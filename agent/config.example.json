@@ -1,0 +1,32 @@
+{
+  "//": "Copy to ~/.config/harness-usage/config.json and edit. Never commit the real file.",
+
+  "device": "desktop",
+
+  "postgres": {
+    "//": "The Pi over Tailscale. Password is the POSTGRES_PASSWORD from server/.env.",
+    "dsn": "postgres://harness:CHANGE_ME@100.x.y.z:5432/harness",
+    "connectionTimeoutMillis": 10000,
+    "statementTimeoutMillis": 30000
+  },
+
+  "sources": {
+    "claude-code": {
+      "enabled": true,
+      "root": "~/.claude/projects",
+      "//billing": "'free' = subscription (Max), 'api' = paid per token. Sets the `billing` column on priced rows.",
+      "billing": "free"
+    },
+    "opencode": {
+      "enabled": true,
+      "db": "~/.local/share/opencode/opencode.db",
+      "billing": "free"
+    }
+  },
+
+  "pricing": {
+    "modelsJson": "~/.cache/opencode/models.json",
+    "//overrides": "null = use the bundled agent/pricing-overrides.json",
+    "overrides": null
+  }
+}

@@ -1,0 +1,55 @@
+#!/bin/sh
+# harness-usage launcher.
+#
+# systemd and launchd do not source a login shell, so an nvm-managed `node` is
+# not on their PATH, and hardcoding a version-pinned nvm path
+# (~/.nvm/versions/node/vXX/bin/node) breaks on the next `nvm install`. This
+# wrapper finds a working node at run time. Both the systemd unit and the
+# launchd plist must invoke THIS script, never `node` directly.
+#
+# Resolution order:
+#   1. `node` already on PATH (interactive use, Homebrew, system package)
+#   2. source nvm.sh and try again
+#   3. newest ~/.nvm/versions/node/*/bin/node
+
+set -eu
+
+# Resolve $0 through any symlinks (this script is meant to be symlinked onto
+# PATH). readlink without -f works on both GNU and BSD/macOS.
+SOURCE=$0
+while [ -h "$SOURCE" ]; do
+  DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)
+  SOURCE=$(readlink "$SOURCE")
+  case $SOURCE in
+    /*) ;;
+    *) SOURCE=$DIR/$SOURCE ;;
+  esac
+done
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)
+AGENT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
+ENTRY="$AGENT_DIR/src/cli.js"
+
+NODE_BIN=$(command -v node 2>/dev/null || true)
+
+if [ -z "$NODE_BIN" ]; then
+  NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+    NODE_BIN=$(command -v node 2>/dev/null || true)
+  fi
+fi
+
+if [ -z "$NODE_BIN" ]; then
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/node; do
+    [ -x "$candidate" ] && NODE_BIN="$candidate"
+  done
+fi
+
+if [ -z "$NODE_BIN" ]; then
+  echo "harness-usage: could not find a node binary (checked PATH, nvm.sh, ~/.nvm)" >&2
+  exit 127
+fi
+
+exec "$NODE_BIN" --no-warnings "$ENTRY" "$@"

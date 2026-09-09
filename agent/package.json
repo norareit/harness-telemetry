@@ -1,0 +1,20 @@
+{
+  "name": "harness-usage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-device agent: reads Claude Code / OpenCode on-disk state, normalizes token usage, archives locally, upserts to Postgres.",
+  "bin": {
+    "harness-usage": "bin/harness-usage"
+  },
+  "scripts": {
+    "start": "node --no-warnings src/cli.js",
+    "doctor": "node --no-warnings src/cli.js doctor"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

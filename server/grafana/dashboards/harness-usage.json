@@ -1,0 +1,228 @@
+{
+  "uid": "harness-usage",
+  "title": "Harness Usage",
+  "tags": ["harness", "llm", "cost"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "5m",
+  "time": { "from": "now-30d", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "device",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "harness-pg" },
+        "query": "SELECT DISTINCT device FROM usage_event ORDER BY 1",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "harness",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "harness-pg" },
+        "query": "SELECT DISTINCT harness FROM usage_event ORDER BY 1",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Month-to-date (potential) spend",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(cost_usd), 0) AS \"MTD spend\" FROM usage_event WHERE ts >= date_trunc('month', now()) AND device IN ($device) AND harness IN ($harness)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Spend in range",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(cost_usd), 0) AS \"spend\" FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness)"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Total tokens in range",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none", "graphMode": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(input_tokens + output_tokens + reasoning_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS \"tokens\" FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness)"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Cache-read ratio",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1, "decimals": 2 },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE WHEN SUM(input_tokens + cache_read_tokens) = 0 THEN 0 ELSE SUM(cache_read_tokens)::float / SUM(input_tokens + cache_read_tokens) END AS \"cache-read ratio\" FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness)"
+        }
+      ]
+    },
+
+    {
+      "id": 10,
+      "title": "Cost over time by model",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" }, "fillOpacity": 80, "lineWidth": 0 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, COALESCE(model, '(unpriced)') AS metric, SUM(cost_usd) AS value FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) GROUP BY 1, 2 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Tokens over time by kind",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" }, "fillOpacity": 80, "lineWidth": 0 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time,\n  SUM(input_tokens) AS \"input\",\n  SUM(output_tokens) AS \"output\",\n  SUM(reasoning_tokens) AS \"reasoning\",\n  SUM(cache_read_tokens) AS \"cache read\",\n  SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS \"cache write\"\nFROM usage_event\nWHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness)\nGROUP BY 1 ORDER BY 1"
+        }
+      ]
+    },
+
+    {
+      "id": 20,
+      "title": "Cost by project",
+      "type": "barchart",
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 13 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "options": { "orientation": "horizontal", "legend": { "showLegend": false }, "xTickLabelRotation": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT regexp_replace(COALESCE(project, '(unknown)'), '^.*/', '') AS project, SUM(cost_usd) AS cost FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) GROUP BY 1 ORDER BY cost DESC LIMIT 20"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Cost by device",
+      "type": "piechart",
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 13 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }, "pieType": "donut" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT device, SUM(cost_usd) AS cost FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) GROUP BY 1 ORDER BY cost DESC"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Billable vs local vs subscription",
+      "type": "piechart",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 13 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }, "pieType": "donut" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT billing, SUM(input_tokens + output_tokens + reasoning_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS tokens FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) GROUP BY 1 ORDER BY tokens DESC"
+        }
+      ]
+    },
+
+    {
+      "id": 30,
+      "title": "Top sessions by cost",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "cost_usd" }, "properties": [ { "id": "unit", "value": "currencyUSD" }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] },
+          { "matcher": { "id": "byName", "options": "total_tokens" }, "properties": [ { "id": "unit", "value": "short" } ] }
+        ]
+      },
+      "options": { "sortBy": [ { "displayName": "cost_usd", "desc": true } ] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  s.started_at,\n  s.harness,\n  s.device,\n  regexp_replace(COALESCE(s.project, '(unknown)'), '^.*/', '') AS project,\n  s.model,\n  s.duration,\n  s.responses,\n  s.total_tokens,\n  s.cost_usd\nFROM usage_session s\nWHERE s.last_event_at >= $__timeFrom() AND s.started_at <= $__timeTo()\n  AND s.device IN ($device) AND s.harness IN ($harness)\nORDER BY s.cost_usd DESC\nLIMIT 50"
+        }
+      ]
+    }
+  ]
+}

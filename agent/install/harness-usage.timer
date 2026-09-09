@@ -1,0 +1,13 @@
+[Unit]
+Description=Run harness usage telemetry sync every 5 minutes
+Documentation=https://github.com/stef/harness-telemetry
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Catch up a single missed run after the machine was powered off / logged out.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

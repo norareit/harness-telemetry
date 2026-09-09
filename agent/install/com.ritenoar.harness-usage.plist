@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ritenoar.harness-usage</string>
+
+    <!-- Invoke the wrapper, never `node` directly — see bin/harness-usage.
+         Adjust the path if the repo is not at ~/projects/harness-telemetry. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/USER/projects/harness-telemetry/agent/bin/harness-usage</string>
+        <string>sync</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Fires once on wake if the interval elapsed while asleep, rather than
+         stacking every missed run. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USER/Library/Logs/harness-usage.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USER/Library/Logs/harness-usage.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

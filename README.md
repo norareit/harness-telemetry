@@ -1,0 +1,208 @@
+# harness-telemetry
+
+Per-session token usage and (potential) cost for **Claude Code** and **OpenCode**,
+across every device, on one Grafana dashboard — while keeping a readable, parseable
+copy of the data on each device.
+
+Local-first: a short-lived per-device agent reads each harness's own on-disk state,
+normalizes it, writes a local JSONL archive, and upserts to Postgres on the Pi over
+Tailscale. Grafana queries Postgres. Extraction and shipping are independent — the
+archive is written even with no network, and a backlog drains on the next run.
+
+```
+                 ┌──────────── desktop / laptop ────────────┐
+  ~/.claude/projects/**/*.jsonl ─┐                             │
+  ~/.local/share/opencode.db  ───┤─▶ harness-usage (agent) ────┼─▶ ~/.local/share/harness-usage/
+  ~/.cache/opencode/models.json ─┘         │  every 5 min      │       events/YYYY-MM-DD.jsonl
+                                           │                   │       state.sqlite (cursors + outbox)
+                                           ▼                   │
+                              Postgres 17 on raspberrypi  ◀────┘   (Tailscale, idempotent upsert)
+                                           ▼
+                                   Grafana dashboard
+```
+
+## Layout
+
+| Path | What |
+|---|---|
+| `agent/` | the per-device sync agent (Node ≥22.5, one dependency: `pg`) |
+| `server/` | `docker compose` stack for the Pi: Postgres + Grafana, provisioned |
+| `plans/001-harness-usage-telemetry.md` | the design + the research it is based on |
+
+---
+
+## Agent
+
+### Install on a device
+
+```sh
+cd agent
+npm install                              # pulls `pg`; SQLite is built into Node
+ln -s "$PWD/bin/harness-usage" ~/.local/bin/harness-usage   # or anywhere on PATH
+
+mkdir -p ~/.config/harness-usage
+cp config.example.json ~/.config/harness-usage/config.json
+$EDITOR ~/.config/harness-usage/config.json   # set device name + Postgres DSN
+```
+
+`bin/harness-usage` is a POSIX-sh wrapper that resolves `node` at run time (PATH,
+then `nvm.sh`, then the newest `~/.nvm/.../node`). **Always invoke the wrapper**,
+never `node src/cli.js` directly — systemd and launchd do not get an nvm `node` on
+their `PATH`, and a version-pinned nvm path breaks on the next `nvm install`.
+
+### Commands
+
+```sh
+harness-usage sync        # incremental: extract → local archive → Postgres upsert
+harness-usage backfill    # ignore cursors, re-scan everything, drain the outbox
+harness-usage show        # local summary: totals, per-model cost, unsynced backlog
+harness-usage doctor      # preflight + regression checks (see below)
+
+harness-usage sync --no-ship   # write the local archive only, skip Postgres
+```
+
+`sync` exits `0` on success, `3` if extraction succeeded but shipping failed
+(rows are safely queued locally), `1` on a real error.
+
+### Scheduling
+
+**desktop (Linux) — systemd user timer:**
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp agent/install/harness-usage.{service,timer} ~/.config/systemd/user/
+# the unit's ExecStart assumes the repo is at ~/projects/harness-telemetry — edit if not
+systemctl --user daemon-reload
+systemctl --user enable --now harness-usage.timer
+systemctl --user list-timers | grep harness-usage      # confirm it is armed
+journalctl --user -u harness-usage -f                   # watch a run
+```
+
+`Persistent=true` catches up one missed run after boot. User timers only run while
+the user has a login session (`Linger=no`) — that is fine, new data only appears while
+he is logged in using the harnesses, and anything missed self-heals next run. Run
+`sudo loginctl enable-linger $USER` only if headless operation is ever wanted.
+
+**laptop (macOS) — launchd LaunchAgent:**
+
+```sh
+cp agent/install/com.ritenoar.harness-usage.plist ~/Library/LaunchAgents/
+# the plist's ProgramArguments path assumes ~/projects/harness-telemetry — edit if not
+launchctl load ~/Library/LaunchAgents/com.ritenoar.harness-usage.plist
+launchctl start com.ritenoar.harness-usage
+tail -f ~/Library/Logs/harness-usage.log
+```
+
+`StartInterval: 300` fires once on wake rather than stacking missed runs.
+
+**Optional, opt-in: near-live sync.** A 5-minute timer means the dashboard can lag
+up to 5 minutes. Claude Code's `SessionEnd` hook and OpenCode's `session.idle`
+plugin event can each call `harness-usage sync` when a session ends. This adds
+coupling to each harness that the base design avoids — not enabled by default.
+
+### `doctor` checks
+
+* both source paths resolve; history size reported
+* price table loads; every provider/model pair in use resolves to a rate card
+* **Claude Code dedupe regression** — recomputes deduped vs naive output /
+  cache-creation totals and asserts the naive sum is still ≥1.5× the deduped one
+  (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0). Also asserts 0 usage
+  conflicts within a `requestId`.
+* **OpenCode reconciliation** — per-message token sums vs the `session` rollup
+  columns, all sessions (invariant: 82/82 at time of writing).
+* Postgres connection + `usage_event` present
+
+---
+
+## Pricing
+
+Rates come from `~/.cache/opencode/models.json` (auto-updating, covers both
+harnesses). `agent/pricing-overrides.json` fills table misses and pins rates so
+historical rows do not silently reprice on a table update. Rules, in order:
+
+* no entry and a local provider (`ollama/*`) → cost `0`, `billing='local'`
+* no entry otherwise → cost `0`, `priced_by='none'` (stays visibly distinct from spend)
+* Anthropic **1-hour** cache write → `2 × input` rate (the table only carries the
+  5-minute rate; 100% of Claude Code cache-creation is 1-hour TTL)
+* OpenAI context tiers → when `input + cache_read` exceeds `tier.size` (272k), the
+  tier rates apply to the whole request
+* `cost = (input·in + billable_output·out + cache_read·cr + cw5m·cw + cw1h·cw1h) / 1e6`
+
+**Reasoning tokens.** For Anthropic they are already inside `output_tokens` and
+billed at the output rate — `output_tokens` is billed as-is. For OpenCode / OpenAI
+`reasoning` is a **separate** counter (verified against the live DB: `total ==
+input + output + reasoning + cache_read`), billed at the output rate — so
+`billable_output = output_tokens + reasoning_tokens`. The switch is on
+`provider === 'anthropic'`. At extraction, `output_tokens` is normalized to
+*exclude* reasoning for every harness; `reasoning_tokens` is stored alongside.
+
+`billing` is `free` (subscription — Stef's Max / OpenCode auth), `api` (paid per
+token), or `local` (`ollama`, genuinely $0). Set per source in `config.json`.
+
+---
+
+## Pi stack (you deploy this)
+
+On `raspberrypi`, with Docker + compose installed:
+
+```sh
+cd server
+cp .env.example .env
+$EDITOR .env        # set POSTGRES_PASSWORD, GRAFANA_ADMIN_PASSWORD;
+                    # TAILSCALE_IP defaults to the Pi's 100.x.y.z (`tailscale ip -4`)
+docker compose up -d
+docker compose ps
+docker compose logs -f grafana
+```
+
+* `postgres:17-alpine` — schema in `postgres/init/01-schema.sql` is applied on first
+  boot (fresh volume only; to re-apply after a change, `docker compose down -v` or
+  run the file with `psql`). Session / day / project rollups are **views**.
+* `grafana/grafana:11.4.0` — datasource and the `harness-usage` dashboard are
+  provisioned from `grafana/provisioning/`, so it comes up populated.
+* Both ports are published on `${TAILSCALE_IP}` only — not the LAN, not the
+  internet. Open `http://raspberrypi:3000` from any tailnet device.
+
+Verify the binding is tailnet-only:
+
+```sh
+ss -tlnp | grep -E ':3000|:5432'          # should show 100.x.y.z, not 0.0.0.0
+curl -sS --max-time 3 http://<pi-LAN-ip>:3000 && echo REACHABLE || echo "blocked (good)"
+```
+
+### Point an agent at it
+
+In `~/.config/harness-usage/config.json`:
+
+```json
+"postgres": { "dsn": "postgres://harness:THE_PASSWORD@100.x.y.z:5432/harness" }
+```
+
+then `harness-usage doctor` and `harness-usage backfill`.
+
+---
+
+## Data model
+
+One fact row per LLM API response, PK `(harness, session_id, message_id)` — so
+re-syncing and overlapping runs are idempotent. For Claude Code `message_id` is the
+API `requestId` (the dedupe key: Claude Code repeats `message.usage` on every
+content-block record; summing naively overcounts output ~127% and cache-creation
+~121%). For OpenCode it is the message row id (no dedupe needed).
+
+```
+harness device session_id message_id ts
+provider model agent project git_branch is_sidechain
+input_tokens output_tokens reasoning_tokens cache_read_tokens
+cache_write_5m_tokens cache_write_1h_tokens
+cost_usd  billing('api'|'local'|'free')  priced_by('table'|'override'|'none')
+```
+
+Local readable copy: `~/.local/share/harness-usage/events/YYYY-MM-DD.jsonl`, one
+object per line. `state.sqlite` alongside holds the sync cursors and the unsynced
+outbox. Claude Code prunes its own transcripts after ~30 days, so the JSONL archive
+is the only durable history past that window — which is why extraction runs and
+archives regardless of whether the Pi is reachable.
+
+If `state.sqlite` is ever lost, `harness-usage backfill` rebuilds from the
+harnesses' own files (within their retention) plus the JSONL archive (beyond it).

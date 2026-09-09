@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Pins and fills for the auto-updating ~/.cache/opencode/models.json price table.",
+    "Two jobs: (1) cover models with no table entry, (2) freeze rates for models whose",
+    "prices we have already attributed to historical rows, so a models.json refresh does",
+    "not silently reprice the past. Keys are '<provider>/<model>'. Rates are USD per",
+    "million tokens. 'cache_write_1h' is optional; when absent the Anthropic rule in",
+    "pricing.js computes it as 2x input. An entry with all-zero rates is a valid way to",
+    "declare a model genuinely free (priced_by stays 'override', billing per source)."
+  ],
+  "overrides": {
+    "opencode/big-pickle": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 }
+  }
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Harness usage telemetry sync (Claude Code + OpenCode -> Postgres)
+Documentation=https://github.com/stef/harness-telemetry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Invoke the wrapper, never `node` directly — see bin/harness-usage.
+# Adjust the path if the repo is not at ~/projects/harness-telemetry.
+ExecStart=%h/projects/harness-telemetry/agent/bin/harness-usage sync
+Nice=10
+# Extraction always writes the local archive; a shipping failure exits 3.
+SuccessExitStatus=0 3
+
+[Install]
+WantedBy=default.target

@@ -1,8 +1,20 @@
 # Harness Telemetry — per-session token & cost reporting for Claude Code + OpenCode
 
-Status: **approved, not yet implemented.**
-Research for this plan was done against the live machine on 2026-09-09; every number below was
-measured, not estimated. Re-measure before trusting them if significant time has passed.
+Status: **implemented 2026-09-09** (`agent/`, `server/`, `README.md`). The open question below is
+resolved — see "Open question" section. Research for this plan was done against the live machine
+on 2026-09-09; every number below was measured, not estimated. Re-measure before trusting them if
+significant time has passed.
+
+Notes from implementation:
+- `models.json` now ships an Anthropic `cache_write` rate (1.25x input) and explicit
+  `tiers`/`context_over_200k` blocks for OpenAI — no hardcoded 272k needed; the 1h Anthropic
+  cache rate is still computed as `2 x input`.
+- The dedupe blow-up on this machine is larger than the plan's figures: naive output is ~2.3x
+  the deduped total (plan said 33%). `doctor` asserts the ratio, not the absolute magnitude.
+- The OpenCode `message`/`session` schema changed: token rollups are now columns on `session`
+  (`tokens_input`, ...), and `message` has a `session_id` column. Reconciliation still 82/82.
+- Postgres path (schema, views, idempotent upsert) verified with `pg-mem`; not run against a
+  real server here — that happens when the user brings up the Pi stack.
 
 ## Context
 
@@ -218,13 +230,15 @@ Cost over time stacked by model; tokens over time split input/output/cache-read/
 month-to-date spend; top sessions by cost (table: project, model, duration, tokens); cost by
 project; cost by device; billable-vs-local split; cache-read ratio.
 
-## Open question to resolve during implementation
+## Open question — RESOLVED
 
-Whether OpenCode's `tokens.reasoning` is already included in `tokens.output` (for Anthropic it is;
-OpenCode's AI-SDK accounting may report it separately). Verify against a `gpt-5.6-sol` session —
-e.g. `ses_f834f199affeZeUVqDuSClOcyW` has output 6577 / reasoning 13902; reasoning exceeding
-output would show it is clearly a separate counter. This affects OpenCode cost magnitude only.
-Settle it with a real query and record the conclusion in `pricing.js` — do not guess.
+OpenCode's `tokens.reasoning` is a **separate counter**, not included in `tokens.output`. Verified
+against the live DB: 435 assistant messages satisfy `total == input + output + reasoning +
+cache_read`, and **0** satisfy the reasoning-folded-into-output form. So for OpenCode/OpenAI the
+agent bills `output_tokens + reasoning_tokens` at the output rate; for Anthropic (Claude Code)
+reasoning is already inside `output_tokens` and is billed as-is. At extraction, `output_tokens`
+is normalized to *exclude* reasoning for every harness, and the switch in `pricing.js` is on
+`provider === 'anthropic'`. Conclusion recorded in `agent/src/pricing.js`.
 
 ## Verification
 
