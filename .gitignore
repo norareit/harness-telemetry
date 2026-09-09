@@ -1,0 +1,29 @@
+# Node
+node_modules/
+npm-debug.log*
+.npm/
+
+# Secrets and per-device config — never commit
+.env
+.env.*
+!.env.example
+server/.env
+config.json
+!server/grafana/**/*.json
+!agent/pricing-overrides.json
+
+# Local telemetry data (the on-device archive lives in ~/.local/share/harness-usage)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+events/
+*.jsonl
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
