@@ -325,6 +325,15 @@ function round6(n) {
   return Math.round(n * 1e6) / 1e6;
 }
 
+// Local inference runners. Membership here is a claim about WHERE the tokens
+// were computed, not about whether the table happens to price the model: these
+// run on hardware you already own, so they are $0 by definition and must never
+// be attributed spend (see price(), which checks this before resolve()).
+// lmstudio was missing until 2026-09-17 — its models fell through to
+// priced_by='none' and were reported by `doctor` as a pricing gap to fill,
+// which would have been exactly the wrong fix.
+const LOCAL_PROVIDERS = new Set(["ollama", "local", "llamacpp", "lmstudio"]);
+
 function isLocalProvider(provider) {
-  return provider === "ollama" || provider === "local" || provider === "llamacpp";
+  return LOCAL_PROVIDERS.has(provider);
 }

@@ -146,7 +146,8 @@ Rates come from `~/.cache/opencode/models.json` (auto-updating, covers both
 harnesses). `agent/pricing-overrides.json` fills table misses and pins rates so
 historical rows do not silently reprice on a table update. Rules, in order:
 
-* no entry and a local provider (`ollama/*`) → cost `0`, `billing='local'`
+* a local provider (`ollama`, `lmstudio`, `llamacpp`, `local`) → cost `0`, `billing='local'`,
+  checked *before* the table so a coincidental name match cannot attribute spend to it
 * no entry otherwise → cost `0`, `priced_by='none'` (stays visibly distinct from spend)
 * Anthropic **1-hour** cache write → `2 × input` rate (the table only carries the
   5-minute rate; 100% of Claude Code cache-creation is 1-hour TTL)
@@ -163,7 +164,8 @@ input + output + reasoning + cache_read`), billed at the output rate — so
 *exclude* reasoning for every harness; `reasoning_tokens` is stored alongside.
 
 `billing` is `free` (subscription — Stef's Max / OpenCode auth), `api` (paid per
-token), or `local` (`ollama`, genuinely $0). Set per source in `config.json`.
+token), or `local` (`ollama`/`lmstudio` and friends, genuinely $0). Set per source in
+`config.json`.
 
 ### Stored rates and the cost audit
 
