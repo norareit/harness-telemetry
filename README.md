@@ -284,8 +284,8 @@ jq -s 'group_by(.harness + .session_id + .message_id)
        | map(last) | map(.cost_usd) | add' events/*.jsonl
 ```
 
-Postgres is unaffected either way: the sink upserts on the same key, so superseded
-lines collapse onto one row.
+Postgres is unaffected either way: `sink-postgres.js` upserts on the same key, so
+superseded lines collapse onto one row.
 
 A line is appended only when the **extracted** data is new or changed — never for a
 reprice, since costs are derived and recomputable. The consequence is that cost fields
