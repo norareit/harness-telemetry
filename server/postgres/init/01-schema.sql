@@ -102,3 +102,88 @@ SELECT
     sum(cost_usd)                         AS cost_usd
 FROM usage_event
 GROUP BY coalesce(project, '(unknown)'), device, harness;
+
+-- ---------------------------------------------------------------------------
+-- Counterfactual repricing (plans/002)
+--
+-- One row per (event, scenario): what this exact token stream would have cost
+-- at another model's rates. The agent computes these in JS so the pricing rules
+-- live in exactly one place; this table is only the materialized result for the
+-- configured shortlist. Ad-hoc comparison across the whole price table happens
+-- via `harness-usage compare`.
+--
+-- cache_model records whether the target actually supports prompt caching:
+-- 'none' means its cache-read tokens were billed at the full input rate, which
+-- dominates the comparison on a cache-heavy workload. Never read a cheap
+-- headline rate without it.
+
+CREATE TABLE IF NOT EXISTS usage_scenario (
+    harness      text NOT NULL,
+    session_id   text NOT NULL,
+    message_id   text NOT NULL,
+    scenario     text NOT NULL,              -- 'openrouter/qwen/qwen3.7-flash'
+    cost_usd     numeric(14,6) NOT NULL DEFAULT 0,
+    cache_model  text NOT NULL DEFAULT 'none'
+                   CHECK (cache_model IN ('full', 'read-only', 'none')),
+    priced_by    text NOT NULL DEFAULT 'none'
+                   CHECK (priced_by IN ('table', 'override', 'none')),
+    tier_applied bigint,                     -- context-tier size in effect, or NULL
+    synced_at    timestamptz NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (harness, session_id, message_id, scenario),
+    FOREIGN KEY (harness, session_id, message_id)
+        REFERENCES usage_event (harness, session_id, message_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS usage_scenario_scenario_idx ON usage_scenario (scenario);
+
+-- Actual vs counterfactual per day. Joins back to usage_event for ts/device so
+-- the scenario table itself stays narrow.
+CREATE OR REPLACE VIEW usage_scenario_daily AS
+SELECT
+    date_trunc('day', e.ts)        AS day,
+    e.device,
+    e.harness,
+    s.scenario,
+    s.cache_model,
+    count(*)                       AS responses,
+    sum(e.cost_usd)                AS actual_cost_usd,
+    sum(s.cost_usd)                AS scenario_cost_usd,
+    sum(s.cost_usd) - sum(e.cost_usd) AS delta_usd
+FROM usage_event e
+JOIN usage_scenario s
+  ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id
+WHERE s.priced_by <> 'none'
+GROUP BY date_trunc('day', e.ts), e.device, e.harness, s.scenario, s.cache_model;
+
+-- Actual vs counterfactual per project — the decision aid.
+CREATE OR REPLACE VIEW usage_scenario_project AS
+SELECT
+    coalesce(e.project, '(unknown)') AS project,
+    e.harness,
+    s.scenario,
+    s.cache_model,
+    count(*)                         AS responses,
+    sum(e.cost_usd)                  AS actual_cost_usd,
+    sum(s.cost_usd)                  AS scenario_cost_usd,
+    sum(s.cost_usd) - sum(e.cost_usd) AS delta_usd
+FROM usage_event e
+JOIN usage_scenario s
+  ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id
+WHERE s.priced_by <> 'none'
+GROUP BY coalesce(e.project, '(unknown)'), e.harness, s.scenario, s.cache_model;
+
+-- What the local GPU is saving: local-billed events repriced onto hosted models.
+CREATE OR REPLACE VIEW usage_local_savings AS
+SELECT
+    s.scenario,
+    s.cache_model,
+    e.device,
+    count(*)                     AS responses,
+    sum(e.input_tokens + e.output_tokens + e.reasoning_tokens) AS tokens,
+    sum(s.cost_usd)              AS would_have_cost_usd
+FROM usage_event e
+JOIN usage_scenario s
+  ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id
+WHERE e.billing = 'local' AND s.priced_by <> 'none'
+GROUP BY s.scenario, s.cache_model, e.device;

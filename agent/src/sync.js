@@ -14,6 +14,7 @@ import { LocalStore } from "./local-store.js";
 import { PostgresSink } from "./sink-postgres.js";
 import { extractClaudeCode } from "./sources/claude-code.js";
 import { extractOpenCode } from "./sources/opencode.js";
+import { scenarioRows } from "./reprice.js";
 
 const SOURCES = {
   "claude-code": extractClaudeCode,
@@ -42,6 +43,11 @@ export async function runSync({ full = false, noShip = false } = {}) {
     shipped: 0,
     unsynced: 0,
     shipError: null,
+    scenarioRows: 0,
+    shippedScenarios: 0,
+    unsyncedScenarios: 0,
+    unresolvedScenarios: [],
+    prunedScenarios: [],
   };
 
   if (full) store.resetCursors();
@@ -85,24 +91,60 @@ export async function runSync({ full = false, noShip = false } = {}) {
       report.extracted[name] = count;
     }
 
+    // --- counterfactual scenarios (plans/002) ------------------------------
+    // Derived, not extracted: a pure function of the stored events plus the
+    // price table, so they are recomputed from the whole local archive rather
+    // than only from what this run happened to extract. That way a changed
+    // scenario list or an updated models.json converges on the next run.
+    const scenarios = config.scenarios || [];
+    if (scenarios.length) {
+      const pruned = store.pruneScenarios(scenarios);
+      if (pruned.length) report.prunedScenarios = pruned;
+
+      const unresolved = scenarios.filter((s) => !pricing.resolveKey(s).card);
+      report.unresolvedScenarios = unresolved;
+
+      const rows = scenarioRows({
+        events: store.allEvents(),
+        pricing,
+        scenarios: scenarios.filter((s) => !unresolved.includes(s)),
+      });
+      store.recordScenarios(rows);
+      report.scenarioRows = rows.length;
+    }
+
     // --- ship ------------------------------------------------------------
     const pending = store.unsynced();
+    const pendingScenarios = store.unsyncedScenarios();
     report.unsynced = pending.length;
+    report.unsyncedScenarios = pendingScenarios.length;
 
-    if (!noShip && pending.length && config.postgres.dsn) {
+    const haveWork = pending.length || pendingScenarios.length;
+    if (!noShip && haveWork && config.postgres.dsn) {
       let sink;
       try {
         sink = new PostgresSink(config);
-        await sink.upsert(pending.map((p) => p.event));
-        store.markSynced(pending.map((p) => p.pk));
-        report.shipped = pending.length;
-        report.unsynced = 0;
+        // Events first — scenario rows carry a foreign key onto them.
+        if (pending.length) {
+          await sink.upsert(pending.map((p) => p.event));
+          store.markSynced(pending.map((p) => p.pk));
+          report.shipped = pending.length;
+          report.unsynced = 0;
+        }
+        if (pendingScenarios.length) {
+          await sink.upsertScenarios(pendingScenarios.map((p) => p.row));
+          store.markScenariosSynced(
+            pendingScenarios.map(({ pk, scenario }) => ({ pk, scenario })),
+          );
+          report.shippedScenarios = pendingScenarios.length;
+          report.unsyncedScenarios = 0;
+        }
       } catch (err) {
         report.shipError = err.message;
       } finally {
         if (sink) await sink.close();
       }
-    } else if (!noShip && pending.length && !config.postgres.dsn) {
+    } else if (!noShip && haveWork && !config.postgres.dsn) {
       report.shipError = "postgres.dsn not configured — rows queued locally";
     }
   } finally {

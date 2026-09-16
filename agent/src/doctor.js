@@ -35,6 +35,12 @@ export async function runDoctor() {
   const checks = [];
   const add = (name, ok, detail) => checks.push({ name, ok, detail });
 
+  // Loaded up front: the Claude Code section prices thinking tokens with it.
+  const pricing = await loadPricing({
+    modelsJsonPath: config.pricing.modelsJson,
+    overridesPath: config.pricing.overrides,
+  });
+
   // --- config -------------------------------------------------------------
   add(
     "config file",
@@ -111,10 +117,6 @@ export async function runDoctor() {
   }
 
   // --- pricing -----------------------------------------------------------
-  const pricing = await loadPricing({
-    modelsJsonPath: config.pricing.modelsJson,
-    overridesPath: config.pricing.overrides,
-  });
   add(
     "price table",
     !pricing.meta.tableError,
@@ -122,6 +124,45 @@ export async function runDoctor() {
       ? `failed to load ${pricing.meta.modelsPath}: ${pricing.meta.tableError.message}`
       : `${countModels(pricing.table)} models from ${pricing.meta.modelsPath}`,
   );
+
+  // Regression guard for the bug where extraction normalized reasoning OUT of
+  // output_tokens while pricing still assumed it was IN, billing Anthropic
+  // thinking tokens at $0. Asserted as a unit probe so it cannot drift with the
+  // dataset: 1M reasoning tokens on opus-5 must cost the full output rate.
+  const probe = {
+    provider: "anthropic",
+    model: "claude-opus-5",
+    input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 1_000_000,
+    cache_read_tokens: 0,
+    cache_write_5m_tokens: 0,
+    cache_write_1h_tokens: 0,
+  };
+  const probeCost = pricing.price(probe, "free").cost_usd;
+  const expectedProbe = pricing.resolve("anthropic", "claude-opus-5").card.base.output;
+  add(
+    "reasoning tokens billed",
+    Math.abs(probeCost - expectedProbe) < 1e-6,
+    `1M reasoning tokens on claude-opus-5 = $${probeCost} (must be $${expectedProbe}; ` +
+      `$0 means the reasoning-exclusion regression is back)`,
+  );
+
+  // Configured counterfactual targets must all resolve, or the dashboard
+  // silently loses a scenario.
+  const scenarios = config.scenarios || [];
+  if (scenarios.length) {
+    const unresolved = scenarios.filter((s) => !pricing.resolveKey(s).card);
+    add(
+      "scenarios resolve",
+      unresolved.length === 0,
+      unresolved.length
+        ? `no rate card for: ${unresolved.join(", ")}`
+        : scenarios
+            .map((s) => `${s} [${pricing.cacheModelOf(s)}]`)
+            .join(", "),
+    );
+  }
 
   const seenPairs = await modelsInUse(config);
   const unpriced = pricing.unpricedModels(seenPairs);
@@ -139,12 +180,16 @@ export async function runDoctor() {
     try {
       sink = new PostgresSink(config);
       const ok = await sink.ping();
-      const schema = await sink.schemaPresent();
+      const missing = await sink.missingTables();
       add("postgres connection", ok, redactDsn(config.postgres.dsn));
       add(
         "postgres schema",
-        schema,
-        schema ? "usage_event present" : "usage_event missing — run server/postgres/init/01-schema.sql",
+        missing.length === 0,
+        missing.length === 0
+          ? "usage_event, usage_scenario present"
+          : `missing: ${missing.join(", ")} — the init script only runs on an empty ` +
+            `volume, so apply server/postgres/init/01-schema.sql by hand, or ` +
+            `re-init with 'docker compose down -v && docker compose up -d' (destroys stored history)`,
       );
     } catch (err) {
       add("postgres connection", false, `${redactDsn(config.postgres.dsn)}: ${err.message}`);

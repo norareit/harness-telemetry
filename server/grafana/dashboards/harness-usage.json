@@ -223,6 +223,91 @@
           "rawSql": "SELECT\n  s.started_at,\n  s.harness,\n  s.device,\n  regexp_replace(COALESCE(s.project, '(unknown)'), '^.*/', '') AS project,\n  s.model,\n  s.duration,\n  s.responses,\n  s.total_tokens,\n  s.cost_usd\nFROM usage_session s\nWHERE s.last_event_at >= $__timeFrom() AND s.started_at <= $__timeTo()\n  AND s.device IN ($device) AND s.harness IN ($harness)\nORDER BY s.cost_usd DESC\nLIMIT 50"
         }
       ]
+    },
+
+    {
+      "id": 40,
+      "title": "Counterfactual cost over time — actual vs alternatives",
+      "description": "What the same token stream would have cost at other models' rates. Estimates: token counts are not portable across tokenizers.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 32 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "spanNulls": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "actual (as billed/notional)" },
+            "properties": [ { "id": "custom.lineWidth", "value": 3 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "white" } } ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, 'actual (as billed/notional)' AS metric, SUM(cost_usd) AS value FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) GROUP BY 1, 2 ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(day, '1d') AS time, scenario || ' [' || cache_model || ']' AS metric, SUM(scenario_cost_usd) AS value FROM usage_scenario_daily WHERE $__timeFilter(day) AND device IN ($device) AND harness IN ($harness) GROUP BY 1, 2 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "title": "What the local model is saving",
+      "description": "Ollama-billed tokens repriced onto hosted models. Local inference has no prompt caching, so context is re-sent as fresh input every turn — which is why the input count is large.",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 42 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "would_have_cost_usd" }, "properties": [ { "id": "unit", "value": "currencyUSD" }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] },
+          { "matcher": { "id": "byName", "options": "tokens" }, "properties": [ { "id": "unit", "value": "short" } ] }
+        ]
+      },
+      "options": { "sortBy": [ { "displayName": "would_have_cost_usd", "desc": false } ] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT scenario, cache_model, device, responses, tokens, would_have_cost_usd FROM usage_local_savings WHERE device IN ($device) ORDER BY would_have_cost_usd ASC"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "title": "Cheapest alternative per project",
+      "description": "The decision aid. Check cache_model before acting: a target with 'none' has no prompt caching and bills cache reads at full input rate.",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 42 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "actual_cost_usd" }, "properties": [ { "id": "unit", "value": "currencyUSD" } ] },
+          { "matcher": { "id": "byName", "options": "scenario_cost_usd" }, "properties": [ { "id": "unit", "value": "currencyUSD" } ] },
+          { "matcher": { "id": "byName", "options": "delta_usd" }, "properties": [ { "id": "unit", "value": "currencyUSD" }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] }
+        ]
+      },
+      "options": { "sortBy": [ { "displayName": "delta_usd", "desc": false } ] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT DISTINCT ON (project)\n  regexp_replace(project, '^.*/', '') AS project,\n  scenario,\n  cache_model,\n  actual_cost_usd,\n  scenario_cost_usd,\n  delta_usd\nFROM usage_scenario_project\nWHERE harness IN ($harness)\nORDER BY project, scenario_cost_usd ASC"
+        }
+      ]
     }
   ]
 }

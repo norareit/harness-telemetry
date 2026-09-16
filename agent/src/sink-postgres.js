@@ -48,12 +48,21 @@ export class PostgresSink {
     return rows[0].ok === 1;
   }
 
-  async schemaPresent() {
+  /**
+   * Which expected tables are absent. Checks every table we write to, not just
+   * usage_event — the init script only runs on a fresh volume, so a database
+   * created before a schema addition looks healthy right up until a sync fails
+   * partway through with a missing relation.
+   */
+  async missingTables() {
+    const expected = ["usage_event", "usage_scenario"];
     const { rows } = await this.pool.query(
-      `SELECT 1 FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name = 'usage_event'`,
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = ANY($1)`,
+      [expected],
     );
-    return rows.length > 0;
+    const present = new Set(rows.map((r) => r.table_name));
+    return expected.filter((t) => !present.has(t));
   }
 
   /**
@@ -86,7 +95,62 @@ export class PostgresSink {
     }
     return events.length;
   }
+
+  /**
+   * Upsert counterfactual scenario rows. Same idempotency contract as
+   * `upsert`: PK is (harness, session_id, message_id, scenario), so replays
+   * converge instead of duplicating.
+   *
+   * These rows FK back to usage_event, so they must be sent only after the
+   * events they reference are committed.
+   */
+  async upsertScenarios(rows, { batchSize = 500 } = {}) {
+    if (!rows.length) return 0;
+    const client = await this.pool.connect();
+    try {
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const chunk = rows.slice(i, i + batchSize);
+        const values = [];
+        const params = [];
+        chunk.forEach((row, r) => {
+          const base = r * SCENARIO_COLUMNS.length;
+          values.push(
+            `(${SCENARIO_COLUMNS.map((_, c) => `$${base + c + 1}`).join(", ")})`,
+          );
+          for (const col of SCENARIO_COLUMNS) params.push(row[col] ?? null);
+        });
+        const sql = `
+          INSERT INTO usage_scenario (${SCENARIO_COLUMNS.join(", ")})
+          VALUES ${values.join(", ")}
+          ON CONFLICT (harness, session_id, message_id, scenario)
+          DO UPDATE SET ${SCENARIO_UPDATE_SET}
+        `;
+        await client.query(sql, params);
+      }
+    } finally {
+      client.release();
+    }
+    return rows.length;
+  }
 }
+
+const SCENARIO_COLUMNS = [
+  "harness",
+  "session_id",
+  "message_id",
+  "scenario",
+  "cost_usd",
+  "cache_model",
+  "priced_by",
+  "tier_applied",
+];
+
+const SCENARIO_UPDATE_SET = SCENARIO_COLUMNS.filter(
+  (c) => !["harness", "session_id", "message_id", "scenario"].includes(c),
+)
+  .map((c) => `${c} = EXCLUDED.${c}`)
+  .concat("synced_at = now()")
+  .join(", ");
 
 function normalize(col, v) {
   if (v === undefined) return null;

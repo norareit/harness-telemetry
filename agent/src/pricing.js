@@ -1,31 +1,38 @@
-// Pricing — turns a normalized token count into a USD figure.
+// Pricing — turns a normalized token count into a USD figure, either at the
+// model's own rates (`price`) or at some other model's rates (`repriceEvent`).
 //
 // Source of truth is ~/.cache/opencode/models.json (auto-updating, covers both
-// harnesses' models). pricing-overrides.json fills table misses and pins rates
-// so historical rows do not reprice when the table updates.
+// harnesses). pricing-overrides.json fills table misses and pins rates so
+// historical rows do not reprice when the table updates.
 //
 // Rates in both files are USD per 1e6 tokens.
 //
-// --- Findings baked in here (measured 2026-09-09, see plans/001) -------------
+// --- Semantics (see plans/002-counterfactual-repricing.md) -------------------
 //
-// 1h cache writes. 100% of Claude Code cache-creation is 1-hour TTL. models.json
-//    carries the 5m `cache_write` rate (1.25x input for Anthropic); the 1h rate
-//    is 2x input. We compute 1h explicitly as 2x input rather than trusting any
-//    single table column, so it stays correct if the table shape changes.
+// Billable output. `output_tokens` EXCLUDES reasoning for every harness — the
+//   extractors normalize it out (sources/claude-code.js subtracts
+//   thinking_tokens; OpenCode reports reasoning separately already). So billable
+//   output is uniformly `output_tokens + reasoning_tokens`, with NO per-provider
+//   special case. An earlier version kept an `provider === 'anthropic'` branch
+//   here from before that normalization existed, which silently billed Anthropic
+//   thinking tokens at $0 — $25.41 across the history measured 2026-09-09.
 //
-// Reasoning tokens. For Anthropic, thinking tokens are already inside
-//    `output_tokens` and are billed at the output rate — so we bill
-//    `output_tokens` as-is and treat `reasoning_tokens` as informational.
-//    For OpenCode/OpenAI reasoning is a SEPARATE counter (verified: 435 assistant
-//    messages satisfy total == input+output+reasoning+cache_read, and 0 satisfy
-//    the reasoning-folded-into-output form). OpenAI bills reasoning at the output
-//    rate, so we bill `output_tokens + reasoning_tokens`.
-//    The switch is on `provider === 'anthropic'`, not on harness, because it is a
-//    property of the upstream API response.
+// Cache fallbacks. A rate card that omits `cache_read` is a model with NO prompt
+//   caching (156 of 358 OpenRouter models). Its cache-read tokens must bill at
+//   the INPUT rate, not free — treating a missing field as 0 understated such a
+//   target by ~10x on this cache-heavy workload. Likewise a card with
+//   `cache_read` but no `cache_write` (297 of 358) bills cache writes at the
+//   input rate rather than an invented multiplier. The resulting classification
+//   is reported as `cache_model`: 'full' | 'read-only' | 'none'.
 //
-// Context tiers. OpenAI large-context models list `tiers` / `context_over_200k`
-//    in models.json with a `tier.size` (272k). When input+cache_read exceeds that
-//    size, the tier rates apply to the whole request.
+// Anthropic 1h writes. Anthropic's 1-hour cache write costs 2x input, while the
+//   table carries only the 5-minute rate. That rule is ANTHROPIC-ONLY: when
+//   repricing onto any other provider, 1h and 5m writes both use that target's
+//   cache-write rate.
+//
+// Context tiers. Large-context models list `tiers` (and/or `context_over_200k`).
+//   Some have MORE THAN ONE tier (e.g. qwen3-coder-plus at 32k and 128k), so we
+//   select the HIGHEST tier whose size is exceeded, not `tiers[0]`.
 
 import { readFile } from "node:fs/promises";
 import { expandHome } from "./config.js";
@@ -66,133 +73,202 @@ export class Pricing {
   }
 
   /**
-   * Look up the rate card for a provider/model. Returns
-   * { rates, tier, source: 'override'|'table'|null }.
-   * `rates` is { input, output, cache_read, cache_write } USD/1e6.
+   * Look up a rate card. Returns { card, source } where source is
+   * 'override' | 'table' | null, and card is
+   * { base: Rates, tiers: [{ size, rates: Rates }] } or null.
+   * Rates fields are numbers, except cache_read / cache_write which are null
+   * when the model does not price them (meaning: no caching of that kind).
    */
   resolve(provider, model) {
     const key = `${provider}/${model}`;
     if (this.overrides[key]) {
-      return { rates: normRates(this.overrides[key]), tier: null, source: "override" };
+      return { card: toCard(this.overrides[key]), source: "override" };
     }
-    const entry = this._index.get(key) || this._index.get(model);
+    const entry =
+      this._index.get(key) || this._index.get(model) || this._index.get(bareOf(model));
     if (entry && entry.cost) {
-      return {
-        rates: normRates(entry.cost),
-        tier: pickTier(entry.cost),
-        source: "table",
-      };
+      return { card: toCard(entry.cost), source: "table" };
     }
-    return { rates: null, tier: null, source: null };
+    return { card: null, source: null };
   }
 
   /**
-   * Price one canonical event (post-normalization: output_tokens excludes
-   * reasoning). Returns { cost_usd, billing, priced_by }.
-   *
-   * @param {object} ev  fields: provider, model, input_tokens, output_tokens,
-   *   reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,
-   *   cache_write_1h_tokens
-   * @param {string} sourceBilling  'free' | 'api' — how this source is actually
-   *   paid for. Only used when a price is known; unpriced local models always
-   *   report billing 'local'.
+   * Resolve a fully-qualified scenario key such as
+   * "openrouter/qwen/qwen3.7-flash" or "tokengo/z-ai/glm-5.2" — the first
+   * segment is the provider, the remainder is the model id.
+   */
+  resolveKey(fullKey) {
+    const slash = String(fullKey).indexOf("/");
+    if (slash === -1) return { card: null, source: null, provider: null, model: fullKey };
+    const provider = fullKey.slice(0, slash);
+    const model = fullKey.slice(slash + 1);
+    return { ...this.resolve(provider, model), provider, model };
+  }
+
+  /**
+   * Price an event at its OWN model's rates.
+   * @param {string} sourceBilling 'free' | 'api' — how this source is actually
+   *   paid for. Unpriced local models always report billing 'local'.
    */
   price(ev, sourceBilling = "free") {
-    const { rates, tier, source } = this.resolve(ev.provider, ev.model);
+    const { card, source } = this.resolve(ev.provider, ev.model);
 
-    if (!rates) {
-      // No rate card anywhere. ollama/* and other local models are genuinely
-      // $0; anything else is just unpriced. Either way cost is 0 and it stays
-      // visibly distinct from real spend.
+    if (!card) {
       const local = isLocalProvider(ev.provider);
       return {
         cost_usd: 0,
         billing: local ? "local" : sourceBilling,
         priced_by: "none",
+        cache_model: "none",
       };
     }
 
-    // Context-tier selection: the whole request reprices when it is over size.
-    let r = rates;
-    if (tier && ev.input_tokens + ev.cache_read_tokens > tier.size) {
-      r = normRates(tier.rates);
-    }
-
-    const inputRate = r.input;
-    const outputRate = r.output;
-    const cacheReadRate = r.cache_read;
-    const cacheWrite5mRate = r.cache_write; // table value is the 5m rate
-    const cacheWrite1hRate =
-      ev.provider === "anthropic" ? inputRate * 2 : cacheWrite5mRate;
-
-    // Reasoning: billed at output rate only when it is a separate counter
-    // (non-Anthropic). For Anthropic it is already inside output_tokens.
-    const billableOutput =
-      ev.provider === "anthropic"
-        ? ev.output_tokens
-        : ev.output_tokens + ev.reasoning_tokens;
-
-    const cost =
-      (ev.input_tokens * inputRate +
-        billableOutput * outputRate +
-        ev.cache_read_tokens * cacheReadRate +
-        ev.cache_write_5m_tokens * cacheWrite5mRate +
-        ev.cache_write_1h_tokens * cacheWrite1hRate) /
-      1e6;
-
-    return {
-      cost_usd: round6(cost),
-      billing: sourceBilling,
-      priced_by: source,
-    };
+    const { cost_usd, cache_model } = computeCost(ev, card, ev.provider);
+    return { cost_usd, billing: sourceBilling, priced_by: source, cache_model };
   }
 
-  /** All provider/model pairs that resolve to no rate card, given events seen. */
+  /**
+   * Reprice an event at ANOTHER model's rates — the counterfactual.
+   * Returns priced_by 'none' with cost 0 when the target has no rate card; the
+   * caller must exclude those rather than reporting them as free.
+   */
+  repriceEvent(ev, targetKey) {
+    const { card, source, provider } = this.resolveKey(targetKey);
+    if (!card) {
+      return {
+        cost_usd: 0,
+        cache_model: "none",
+        priced_by: "none",
+        tier_applied: null,
+        scenario: targetKey,
+      };
+    }
+    const { cost_usd, cache_model, tier_applied } = computeCost(ev, card, provider);
+    return { cost_usd, cache_model, priced_by: source, tier_applied, scenario: targetKey };
+  }
+
+  /** All provider/model pairs that resolve to no rate card. */
   unpricedModels(pairs) {
     const out = [];
     for (const [provider, model] of pairs) {
-      const { rates } = this.resolve(provider, model);
-      if (!rates && !isLocalProvider(provider)) out.push(`${provider}/${model}`);
+      const { card } = this.resolve(provider, model);
+      if (!card && !isLocalProvider(provider)) out.push(`${provider}/${model}`);
     }
     return [...new Set(out)].sort();
   }
+
+  /** Classify a target's caching support without pricing anything. */
+  cacheModelOf(targetKey) {
+    const { card } = this.resolveKey(targetKey);
+    return card ? cacheModelOf(card.base) : null;
+  }
 }
+
+// --- costing ---------------------------------------------------------------
+
+/**
+ * @param {object} ev             canonical token counts
+ * @param {object} card           { base, tiers }
+ * @param {string} targetProvider provider the rates belong to (governs the
+ *                                Anthropic 1h rule)
+ */
+function computeCost(ev, card, targetProvider) {
+  const contextTokens = ev.input_tokens + ev.cache_read_tokens;
+  const { rates, tierSize } = selectTier(card, contextTokens);
+
+  const cache_model = cacheModelOf(rates);
+
+  // Fallbacks: a model that does not price cached tokens charges them as input.
+  const cacheReadRate = rates.cache_read ?? rates.input;
+  const cacheWriteRate = rates.cache_write ?? rates.input;
+  const cacheWrite1hRate =
+    targetProvider === "anthropic" && rates.cache_write != null
+      ? rates.input * 2
+      : cacheWriteRate;
+
+  const billableOutput = ev.output_tokens + ev.reasoning_tokens;
+
+  const cost =
+    (ev.input_tokens * rates.input +
+      billableOutput * rates.output +
+      ev.cache_read_tokens * cacheReadRate +
+      ev.cache_write_5m_tokens * cacheWriteRate +
+      ev.cache_write_1h_tokens * cacheWrite1hRate) /
+    1e6;
+
+  return { cost_usd: round6(cost), cache_model, tier_applied: tierSize };
+}
+
+/** Highest tier whose size is exceeded; base rates when none apply. */
+function selectTier(card, contextTokens) {
+  let best = null;
+  for (const t of card.tiers) {
+    if (contextTokens > t.size && (!best || t.size > best.size)) best = t;
+  }
+  return best
+    ? { rates: best.rates, tierSize: best.size }
+    : { rates: card.base, tierSize: null };
+}
+
+function cacheModelOf(rates) {
+  if (rates.cache_read == null) return "none";
+  if (rates.cache_write == null) return "read-only";
+  return "full";
+}
+
+// --- table plumbing --------------------------------------------------------
 
 function buildIndex(table) {
   // models.json shape: { <providerId>: { models: { <modelKey>: {cost,...} } } }
-  // modelKey is usually bare ("gpt-5.6-sol") but some providers prefix it
-  // ("provider/model"). Index both "<provider>/<model>" and bare "<model>".
+  // modelKey is bare ("gpt-5.6-sol") for some providers and namespaced
+  // ("qwen/qwen3.7-flash") for aggregators. Index every form we might be asked
+  // for: "<provider>/<modelKey>", "<provider>/<bare>", "<modelKey>", "<bare>".
   const idx = new Map();
   for (const [providerId, provider] of Object.entries(table || {})) {
     const models = provider && provider.models;
     if (!models) continue;
     for (const [modelKey, entry] of Object.entries(models)) {
-      const bare = modelKey.includes("/") ? modelKey.split("/").pop() : modelKey;
-      idx.set(`${providerId}/${bare}`, entry);
+      const bare = bareOf(modelKey);
+      idx.set(`${providerId}/${modelKey}`, entry);
+      if (!idx.has(`${providerId}/${bare}`)) idx.set(`${providerId}/${bare}`, entry);
+      if (!idx.has(modelKey)) idx.set(modelKey, entry);
       if (!idx.has(bare)) idx.set(bare, entry);
     }
   }
   return idx;
 }
 
-function pickTier(cost) {
-  const t = Array.isArray(cost.tiers) ? cost.tiers[0] : null;
-  if (t && t.tier && Number.isFinite(t.tier.size)) {
-    return { size: t.tier.size, rates: t };
+function toCard(cost) {
+  const tiers = [];
+  if (Array.isArray(cost.tiers)) {
+    for (const t of cost.tiers) {
+      const size = t?.tier?.size;
+      if (Number.isFinite(size)) tiers.push({ size, rates: normRates(t) });
+    }
   }
-  if (cost.context_over_200k) {
-    return { size: 200000, rates: cost.context_over_200k };
+  if (!tiers.length && cost.context_over_200k) {
+    tiers.push({ size: 200000, rates: normRates(cost.context_over_200k) });
   }
-  return null;
+  return { base: normRates(cost), tiers };
 }
 
+/**
+ * Note the deliberate asymmetry: input/output always coerce to a number, but
+ * cache_read / cache_write stay NULL when absent. Absence is meaningful — it
+ * says the model has no such cache tier — and collapsing it to 0 would price
+ * those tokens as free.
+ */
 function normRates(c) {
   return {
     input: num(c.input),
     output: num(c.output),
-    cache_read: num(c.cache_read),
-    cache_write: num(c.cache_write ?? c.input * 1.25),
+    cache_read: c.cache_read == null ? null : num(c.cache_read),
+    cache_write: c.cache_write == null ? null : num(c.cache_write),
   };
+}
+
+function bareOf(key) {
+  return String(key).includes("/") ? String(key).split("/").pop() : String(key);
 }
 
 function num(v) {

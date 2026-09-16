@@ -140,6 +140,79 @@ export class LocalStore {
     }
   }
 
+  // --- scenarios (derived; see plans/002) ----------------------------------
+
+  /** Every stored event, for repricing / `compare`. */
+  *allEvents() {
+    for (const r of this.db.prepare("SELECT payload FROM outbox ORDER BY ts").all()) {
+      yield JSON.parse(r.payload);
+    }
+  }
+
+  /**
+   * Upsert derived scenario rows. A changed cost (reprice, or a models.json
+   * update) clears `synced` so the row re-ships; an unchanged one is left
+   * alone so re-runs stay cheap.
+   */
+  recordScenarios(rows) {
+    const stmt = this.db.prepare(
+      `INSERT INTO outbox_scenario (pk, scenario, payload, synced)
+       VALUES (?, ?, ?, 0)
+       ON CONFLICT(pk, scenario) DO UPDATE SET
+         payload = excluded.payload,
+         synced = CASE WHEN outbox_scenario.payload = excluded.payload
+                       THEN outbox_scenario.synced ELSE 0 END`,
+    );
+    this.db.prepare("BEGIN").run();
+    try {
+      for (const row of rows) {
+        const pk = `${row.harness}${row.session_id}${row.message_id}`;
+        stmt.run(pk, row.scenario, JSON.stringify(row));
+      }
+      this.db.prepare("COMMIT").run();
+    } catch (e) {
+      this.db.prepare("ROLLBACK").run();
+      throw e;
+    }
+  }
+
+  unsyncedScenarios(limit = 200000) {
+    return this.db
+      .prepare(
+        "SELECT pk, scenario, payload FROM outbox_scenario WHERE synced = 0 LIMIT ?",
+      )
+      .all(limit)
+      .map((r) => ({ pk: r.pk, scenario: r.scenario, row: JSON.parse(r.payload) }));
+  }
+
+  markScenariosSynced(pairs) {
+    if (!pairs.length) return;
+    const stmt = this.db.prepare(
+      "UPDATE outbox_scenario SET synced = 1 WHERE pk = ? AND scenario = ?",
+    );
+    this.db.prepare("BEGIN").run();
+    try {
+      for (const { pk, scenario } of pairs) stmt.run(pk, scenario);
+      this.db.prepare("COMMIT").run();
+    } catch (e) {
+      this.db.prepare("ROLLBACK").run();
+      throw e;
+    }
+  }
+
+  /** Drop locally-queued rows for scenarios no longer configured. */
+  pruneScenarios(keep) {
+    const rows = this.db
+      .prepare("SELECT DISTINCT scenario FROM outbox_scenario")
+      .all()
+      .map((r) => r.scenario);
+    const stale = rows.filter((s) => !keep.includes(s));
+    for (const s of stale) {
+      this.db.prepare("DELETE FROM outbox_scenario WHERE scenario = ?").run(s);
+    }
+    return stale;
+  }
+
   // --- reporting -----------------------------------------------------------
 
   summary() {
@@ -224,5 +297,17 @@ function migrate(db) {
       pk   TEXT PRIMARY KEY,
       hash TEXT NOT NULL
     );
+    -- Counterfactual scenario costs (plans/002). Unlike events these are
+    -- DERIVED — recomputable at any time from the events plus the price table —
+    -- so they are not written to the JSONL archive, only queued for shipping.
+    CREATE TABLE IF NOT EXISTS outbox_scenario (
+      pk        TEXT NOT NULL,
+      scenario  TEXT NOT NULL,
+      payload   TEXT NOT NULL,
+      synced    INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pk, scenario)
+    );
+    CREATE INDEX IF NOT EXISTS outbox_scenario_unsynced
+      ON outbox_scenario (synced);
   `);
 }

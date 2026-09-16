@@ -61,6 +61,32 @@ harness-usage doctor      # preflight + regression checks (see below)
 harness-usage sync --no-ship   # write the local archive only, skip Postgres
 ```
 
+### Counterfactual repricing
+
+`compare` answers "what would this exact token stream have cost somewhere else?"
+It works against **any** model in the price table (~7,600), not just the configured
+scenarios:
+
+```sh
+harness-usage compare --as openrouter/qwen/qwen3.7-flash
+harness-usage compare --as openrouter/anthropic/claude-sonnet-5 \
+                      --as tokengo/z-ai/glm-5.2 --group project
+harness-usage compare --only-local --as openrouter/qwen/qwen3.5-9b   # what Ollama saves
+```
+
+`--group` takes `project`, `model`, `agent`, `day`, `harness` or `device`.
+
+**Always read the `cache` column.** A target marked `none` has no prompt caching, so
+its cache-read tokens are billed at the full input rate. On this workload — which is
+overwhelmingly cache reads — that matters far more than the headline per-token price,
+and a "cheap" model without caching can easily cost more than an expensive one with it.
+
+Repriced figures are **estimates**: token counts are not portable across tokenizers,
+so treat them as "2x or 20x", not as a budget.
+
+The `scenarios` list in `config.json` is the subset materialized into Postgres for the
+dashboard; set it to `[]` to skip that work entirely.
+
 `sync` exits `0` on success, `3` if extraction succeeded but shipping failed
 (rows are safely queued locally), `1` on a real error.
 
