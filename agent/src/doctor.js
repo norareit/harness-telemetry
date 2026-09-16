@@ -294,6 +294,21 @@ function fmtM(n) {
   return (n / 1e6).toFixed(2) + "M";
 }
 
+// Redact the password from a DSN for display.
+//
+// Must NOT use a lazy /[^@]+@/ for the password: a password containing '@'
+// (legal, and common in generated passwords) would end the match early and
+// print the remainder of the secret verbatim. The host separator is the LAST
+// '@' in the string, so anchor on that.
 function redactDsn(dsn) {
-  return String(dsn).replace(/\/\/([^:]+):[^@]+@/, "//$1:***@");
+  const s = String(dsn);
+  const schemeEnd = s.indexOf("://");
+  const at = s.lastIndexOf("@");
+  if (schemeEnd === -1 || at === -1 || at < schemeEnd) return s;
+
+  const userinfo = s.slice(schemeEnd + 3, at);
+  const colon = userinfo.indexOf(":");
+  if (colon === -1) return s; // no password present
+
+  return `${s.slice(0, schemeEnd + 3)}${userinfo.slice(0, colon)}:***${s.slice(at)}`;
 }
