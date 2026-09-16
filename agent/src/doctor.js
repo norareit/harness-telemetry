@@ -140,14 +140,30 @@ export async function runDoctor() {
     cache_write_5m_tokens: 0,
     cache_write_1h_tokens: 0,
   };
-  const probeCost = pricing.price(probe, "free").cost_usd;
-  const expectedProbe = pricing.resolve("anthropic", "claude-opus-5").card.base.output;
-  add(
-    "reasoning tokens billed",
-    Math.abs(probeCost - expectedProbe) < 1e-6,
-    `1M reasoning tokens on claude-opus-5 = $${probeCost} (must be $${expectedProbe}; ` +
-      `$0 means the reasoning-exclusion regression is back)`,
-  );
+  // The probe needs its own rate card to state an expectation. A stale price
+  // table has no anthropic/claude-opus-5 entry at all, and reading `.card.base`
+  // off that miss threw out of runDoctor() — losing every check below to a
+  // TypeError that named neither the model nor the table. A miss fails THIS
+  // check and nothing else; "scenarios resolve" then says which else are gone.
+  const probeCard = pricing.resolve("anthropic", "claude-opus-5").card;
+  if (probeCard) {
+    const probeCost = pricing.price(probe, "free").cost_usd;
+    const expectedProbe = probeCard.base.output;
+    add(
+      "reasoning tokens billed",
+      Math.abs(probeCost - expectedProbe) < 1e-6,
+      `1M reasoning tokens on claude-opus-5 = $${probeCost} (must be $${expectedProbe}; ` +
+        `$0 means the reasoning-exclusion regression is back)`,
+    );
+  } else {
+    add(
+      "reasoning tokens billed",
+      false,
+      `cannot run: no rate card for anthropic/claude-opus-5 in ${pricing.meta.modelsPath} — ` +
+        `the table is refreshed by OpenCode, so a copy older than the model predates it. ` +
+        `Refresh it, or pin the model in pricing-overrides.json`,
+    );
+  }
 
   // Configured counterfactual targets must all resolve, or the dashboard
   // silently loses a scenario.
