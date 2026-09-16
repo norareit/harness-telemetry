@@ -61,35 +61,43 @@ export async function runSync({ full = false, noShip = false } = {}) {
       const billing = srcCfg.billing || "free";
       let count = 0;
 
-      for await (const raw of extract({ store, config, full })) {
-        const priced = pricing.price(
-          {
-            provider: raw.provider,
-            model: raw.model,
-            input_tokens: raw.input_tokens,
-            output_tokens: raw.output_tokens,
-            reasoning_tokens: raw.reasoning_tokens,
-            cache_read_tokens: raw.cache_read_tokens,
-            cache_write_5m_tokens: raw.cache_write_5m_tokens,
-            cache_write_1h_tokens: raw.cache_write_1h_tokens,
-          },
-          billing,
-        );
-        if (priced.priced_by === "none" && priced.billing !== "local") {
-          report.unpriced.add(`${raw.provider}/${raw.model}`);
-        }
+      // One transaction around the whole extraction pass, cursors included.
+      // record() is ~12.5ms per event unbatched because WAL fsyncs each implicit
+      // transaction: a cold start cost 53.7s, of which only ~0.5s was actually
+      // reading the sources. Cursors must be inside the same transaction — see
+      // LocalStore.transactionAsync for why committing them separately could
+      // permanently skip events.
+      await store.transactionAsync(async () => {
+        for await (const raw of extract({ store, config, full })) {
+          const priced = pricing.price(
+            {
+              provider: raw.provider,
+              model: raw.model,
+              input_tokens: raw.input_tokens,
+              output_tokens: raw.output_tokens,
+              reasoning_tokens: raw.reasoning_tokens,
+              cache_read_tokens: raw.cache_read_tokens,
+              cache_write_5m_tokens: raw.cache_write_5m_tokens,
+              cache_write_1h_tokens: raw.cache_write_1h_tokens,
+            },
+            billing,
+          );
+          if (priced.priced_by === "none" && priced.billing !== "local") {
+            report.unpriced.add(`${raw.provider}/${raw.model}`);
+          }
 
-        // Spread the whole priced result: cost, billing, priced_by, and the
-        // applied rate card (cache_model / tier_applied / rate_*). An earlier
-        // version cherry-picked three fields and silently dropped the rest.
-        const state = store.record({
-          ...raw,
-          device: config.device,
-          ...priced,
-        });
-        report.recorded[state]++;
-        count++;
-      }
+          // Spread the whole priced result: cost, billing, priced_by, and the
+          // applied rate card (cache_model / tier_applied / rate_*). An earlier
+          // version cherry-picked three fields and silently dropped the rest.
+          const state = store.record({
+            ...raw,
+            device: config.device,
+            ...priced,
+          });
+          report.recorded[state]++;
+          count++;
+        }
+      });
       report.extracted[name] = count;
     }
 
@@ -99,11 +107,16 @@ export async function runSync({ full = false, noShip = false } = {}) {
     // update is actually picked up instead of freezing until the next backfill.
     // Storing the applied rates is what makes this safe: a reprice shows up in
     // the rate_* columns rather than silently moving historical totals.
-    for (const ev of [...store.allEvents()]) {
-      const srcCfg = config.sources[ev.harness];
-      const priced = pricing.price(ev, srcCfg?.billing || "free");
-      if (store.record({ ...ev, ...priced }) === "changed") report.repriced++;
-    }
+    // One transaction for the whole pass: the repricing arithmetic itself is
+    // ~4ms for the full archive, but the per-event SQLite writes cost 26s
+    // unbatched because WAL fsyncs each implicit transaction.
+    store.transaction(() => {
+      for (const ev of [...store.allEvents()]) {
+        const srcCfg = config.sources[ev.harness];
+        const priced = pricing.price(ev, srcCfg?.billing || "free");
+        if (store.record({ ...ev, ...priced }) === "changed") report.repriced++;
+      }
+    });
 
     // --- counterfactual scenarios (plans/002) ------------------------------
     // Derived, not extracted: a pure function of the stored events plus the

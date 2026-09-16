@@ -92,6 +92,61 @@ export class LocalStore {
     this.db.exec("DELETE FROM cc_cursor; DELETE FROM kv WHERE key LIKE 'watermark:%';");
   }
 
+  /**
+   * Run `fn` inside a single SQLite transaction.
+   *
+   * record() issues 2 SELECTs and up to 2 INSERTs per event. Outside a
+   * transaction each of those is its own implicit transaction, and WAL fsyncs
+   * every one: repricing 4,214 events cost 26.0s — ~6.2ms per event, essentially
+   * all of it disk sync. Batched, the same work is milliseconds. recordScenarios()
+   * already did this, which is why it upserts 29,498 rows in 110ms.
+   *
+   * Caveat: record() also appends to the JSONL archive, which is NOT part of the
+   * transaction. A crash mid-transaction can leave an appended line whose
+   * `archived` row rolled back, so the next run re-appends it. That is benign —
+   * `compact-archive` removes the duplicate and Postgres upserts on the PK
+   * regardless — but it is why the archive must always be read last-wins.
+   */
+  transaction(fn) {
+    this.db.prepare("BEGIN").run();
+    try {
+      const out = fn();
+      this.db.prepare("COMMIT").run();
+      return out;
+    } catch (e) {
+      this.db.prepare("ROLLBACK").run();
+      throw e;
+    }
+  }
+
+  /**
+   * Async variant, for bodies that await — notably the extraction loop, which
+   * is an async generator.
+   *
+   * Extraction must be wrapped as a WHOLE, cursors included, not batched in
+   * chunks: the generator advances per-file cursors into this same database as
+   * it goes. If cursors committed independently of the events they cover, a
+   * crash could leave a cursor pointing past events that were never stored, and
+   * the next run would skip them permanently. Wrapping everything means a crash
+   * rolls the cursor back too, and re-reading is harmless because the PK upsert
+   * is idempotent.
+   *
+   * Holding a write transaction across the generator's file I/O is acceptable
+   * here: that I/O measures ~0.5s for the full history, and this store has a
+   * single writer by construction.
+   */
+  async transactionAsync(fn) {
+    this.db.prepare("BEGIN").run();
+    try {
+      const out = await fn();
+      this.db.prepare("COMMIT").run();
+      return out;
+    } catch (e) {
+      this.db.prepare("ROLLBACK").run();
+      throw e;
+    }
+  }
+
   // --- outbox --------------------------------------------------------------
 
   /**
