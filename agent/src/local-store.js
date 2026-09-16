@@ -10,7 +10,8 @@
 //      appended to the JSONL, and flipped to synced=1 only on a confirmed
 //      Postgres upsert. If shipping is down the backlog just accumulates.
 //
-// SQLite comes from the built-in node:sqlite (Node >=22.5) — no native build.
+// SQLite comes from the built-in node:sqlite (Node >=22.13, where it stopped
+// needing --experimental-sqlite) — no native build.
 
 import { DatabaseSync } from "node:sqlite";
 import {

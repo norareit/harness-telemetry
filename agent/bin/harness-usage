@@ -7,10 +7,20 @@
 # wrapper finds a working node at run time. Both the systemd unit and the
 # launchd plist must invoke THIS script, never `node` directly.
 #
-# Resolution order:
+# "Working" means more than present. The agent imports node:sqlite, which is
+# only importable unflagged from v22.13 (v23.4 on the 23.x line); from v22.5 it
+# exists but needs --experimental-sqlite. On an older node the import fails
+# while the module graph is still linking -- ERR_UNKNOWN_BUILTIN_MODULE, before
+# a line of our code runs, so there is nowhere in JS to catch it and say why.
+# Each candidate is therefore PROBED for the module here, and one that lacks it
+# is skipped rather than exec'd. This is not hypothetical on a dev box: the
+# interactive shell picks up an nvm-managed current node while launchd/systemd
+# inherit whatever older node is on the system PATH.
+#
+# Candidate order:
 #   1. `node` already on PATH (interactive use, Homebrew, system package)
-#   2. source nvm.sh and try again
-#   3. newest ~/.nvm/versions/node/*/bin/node
+#   2. node from a sourced nvm.sh
+#   3. ~/.nvm/versions/node/*/bin/node, newest last
 
 set -eu
 
@@ -30,21 +40,53 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)
 AGENT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 ENTRY="$AGENT_DIR/src/cli.js"
 
-NODE_BIN=$(command -v node 2>/dev/null || true)
+NODE_BIN=
+REJECTED=
+
+# `node -e` runs as CommonJS regardless of the package type, so require() is the
+# probe that works on every version -- including the ones too old to have the
+# module, which is the whole point.
+has_sqlite() {
+  "$1" -e 'require("node:sqlite")' >/dev/null 2>&1
+}
+
+reject() {
+  REJECTED="$REJECTED
+  $1 ($("$1" -v 2>/dev/null || echo 'unknown version'))"
+}
+
+consider() {
+  [ -n "$NODE_BIN" ] && return 0
+  [ -n "${1:-}" ] || return 0
+  [ -x "$1" ] || return 0
+  if has_sqlite "$1"; then NODE_BIN=$1; else reject "$1"; fi
+  return 0
+}
+
+consider "$(command -v node 2>/dev/null || true)"
 
 if [ -z "$NODE_BIN" ]; then
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [ -s "$NVM_DIR/nvm.sh" ]; then
     # shellcheck disable=SC1091
     . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
-    NODE_BIN=$(command -v node 2>/dev/null || true)
+    consider "$(command -v node 2>/dev/null || true)"
   fi
 fi
 
 if [ -z "$NODE_BIN" ]; then
+  # Glob order is lexicographic, which puts the newest of the v2x installs last
+  # -- so keep overwriting rather than stopping at the first match.
   for candidate in "$HOME"/.nvm/versions/node/*/bin/node; do
-    [ -x "$candidate" ] && NODE_BIN="$candidate"
+    [ -x "$candidate" ] || continue
+    if has_sqlite "$candidate"; then NODE_BIN=$candidate; else reject "$candidate"; fi
   done
+fi
+
+if [ -z "$NODE_BIN" ] && [ -n "$REJECTED" ]; then
+  echo "harness-usage: found node, but no installation with the built-in node:sqlite module." >&2
+  echo "harness-usage: needs node >=22.13 (or >=23.4 on the 23.x line). Rejected:$REJECTED" >&2
+  exit 127
 fi
 
 if [ -z "$NODE_BIN" ]; then
