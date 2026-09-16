@@ -173,7 +173,11 @@
       "gridPos": { "h": 9, "w": 8, "x": 8, "y": 13 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }, "pieType": "donut" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "values": true, "calcs": [], "fields": "" }
+      },
       "targets": [
         {
           "refId": "A",
@@ -190,7 +194,11 @@
       "gridPos": { "h": 9, "w": 8, "x": 16, "y": 13 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }, "pieType": "donut" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "values": true, "calcs": [], "fields": "" }
+      },
       "targets": [
         {
           "refId": "A",
