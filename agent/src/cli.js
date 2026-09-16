@@ -37,6 +37,9 @@ try {
     case "compact-archive":
       await cmdCompactArchive();
       break;
+    case "reprice":
+      await cmdReprice();
+      break;
     case "doctor":
       await cmdDoctor();
       break;
@@ -56,7 +59,17 @@ try {
 }
 
 function parseArgs(argv) {
-  const o = { as: [], group: null, since: null, onlyLocal: false, noShip: false };
+  const o = {
+    as: [],
+    group: null,
+    since: null,
+    onlyLocal: false,
+    noShip: false,
+    unpricedOnly: false,
+    model: null,
+    scenario: null,
+    dryRun: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case "--as":
@@ -73,6 +86,18 @@ function parseArgs(argv) {
         break;
       case "--no-ship":
         o.noShip = true;
+        break;
+      case "--unpriced-only":
+        o.unpricedOnly = true;
+        break;
+      case "--model":
+        o.model = argv[++i];
+        break;
+      case "--scenario":
+        o.scenario = argv[++i];
+        break;
+      case "--dry-run":
+        o.dryRun = true;
         break;
     }
   }
@@ -91,9 +116,6 @@ async function cmdSync({ full }) {
   );
   if (r.unpriced.length) {
     console.log(`  unpriced models: ${r.unpriced.join(", ")}`);
-  }
-  if (r.repriced) {
-    console.log(`  repriced: ${r.repriced} stored events changed cost at current rates`);
   }
   if (r.scenarioRows) {
     console.log(`  scenarios: ${r.scenarioRows} rows across the configured targets`);
@@ -116,6 +138,86 @@ async function cmdSync({ full }) {
     );
   } else {
     console.log(`  ship: nothing to send`);
+  }
+}
+
+/**
+ * Deliberate re-valuation. Stored costs are frozen at ingest (plans/004), so
+ * this is the ONLY way to correct one — after fixing a pricing bug or adding an
+ * override. Without it the gpt-5.6-terra-fast incident, where 171 events sat at
+ * $0 while a lookup bug was live, would have been permanent.
+ */
+async function cmdReprice() {
+  const config = await loadConfig();
+  const pricing = await loadPricing({
+    modelsJsonPath: config.pricing.modelsJson,
+    overridesPath: config.pricing.overrides,
+  });
+  const store = new LocalStore();
+  try {
+    if (opts.scenario) {
+      if (opts.dryRun) {
+        console.log(`dry-run: would drop all stored rows for scenario ${opts.scenario}`);
+      } else {
+        const n = store.dropScenario(opts.scenario);
+        console.log(
+          `dropped ${n} rows for ${opts.scenario}; the next sync reprices them at current rates`,
+        );
+      }
+      return;
+    }
+
+    let examined = 0;
+    const updates = [];
+    for (const ev of store.allEvents()) {
+      if (opts.model && `${ev.provider}/${ev.model}` !== opts.model) continue;
+      if (opts.unpricedOnly && ev.priced_by !== "none") continue;
+      examined++;
+
+      const srcCfg = config.sources[ev.harness];
+      const priced = pricing.price(ev, srcCfg?.billing || "free");
+      const moved =
+        Math.abs((priced.cost_usd || 0) - (ev.cost_usd || 0)) > 1e-9 ||
+        priced.priced_by !== ev.priced_by;
+      if (moved) updates.push({ ev, priced });
+    }
+
+    const scope =
+      (opts.model ? ` model=${opts.model}` : "") +
+      (opts.unpricedOnly ? " unpriced-only" : "");
+    if (!updates.length) {
+      console.log(`reprice:${scope || " all"} — ${examined} events examined, none would change`);
+      return;
+    }
+
+    const delta = updates.reduce(
+      (s, u) => s + (u.priced.cost_usd || 0) - (u.ev.cost_usd || 0),
+      0,
+    );
+    const sample = updates
+      .slice(0, 3)
+      .map(
+        (u) =>
+          `${u.ev.provider}/${u.ev.model} $${(u.ev.cost_usd || 0).toFixed(6)} -> $${u.priced.cost_usd.toFixed(6)}`,
+      );
+
+    if (opts.dryRun) {
+      console.log(
+        `dry-run:${scope || " all"} — ${examined} examined, ${updates.length} would change, ` +
+          `net $${delta.toFixed(2)}\n  e.g. ${sample.join("\n       ")}`,
+      );
+      return;
+    }
+
+    store.transaction(() => {
+      for (const { ev, priced } of updates) store.record({ ...ev, ...priced });
+    });
+    console.log(
+      `repriced ${updates.length}/${examined} events, net $${delta.toFixed(2)}; ` +
+        `queued for shipping\n  e.g. ${sample.join("\n       ")}`,
+    );
+  } finally {
+    store.close();
   }
 }
 
@@ -305,6 +407,7 @@ function usage() {
   show              print the local summary
   compare           reprice stored usage against other models
   compact-archive   rewrite events/*.jsonl keeping the last line per event
+  reprice           deliberately re-value stored events (costs are frozen at ingest)
   doctor            preflight + regression checks
 
   --no-ship         sync/backfill: write the local archive only, skip Postgres
@@ -315,6 +418,12 @@ function usage() {
   --group <key>     ${GROUP_KEYS.join(" | ")}
   --since <YYYY-MM-DD>
   --only-local      only events billed 'local' (what your Ollama box saves)
+
+  reprice flags:
+  --unpriced-only   only events with no rate card (after adding an override)
+  --model <prov/model>  restrict to one model
+  --scenario <key>  drop that scenario's rows; next sync reprices them
+  --dry-run         report what would change, write nothing
 
 config: ${CONFIG_PATH}`);
 }

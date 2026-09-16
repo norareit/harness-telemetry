@@ -176,6 +176,24 @@ export class Pricing {
     return [...new Set(out)].sort();
   }
 
+  /**
+   * The TABLE's rate card for a key, deliberately ignoring overrides.
+   *
+   * Only useful for drift detection: a pinned override never tracks the live
+   * table, which is the point, but silent rot is not. Returns null when the
+   * table has no entry — which is usually *why* the key is pinned.
+   */
+  tableCard(fullKey) {
+    const slash = String(fullKey).indexOf("/");
+    if (slash === -1) return null;
+    const provider = fullKey.slice(0, slash);
+    const model = fullKey.slice(slash + 1);
+    const entry =
+      this._index.get(`${provider}/${model}`) ||
+      this._index.get(`${provider}/${bareOf(model)}`);
+    return entry && entry.cost ? toCard(entry.cost) : null;
+  }
+
   /** Classify a target's caching support without pricing anything. */
   cacheModelOf(targetKey) {
     const { card } = this.resolveKey(targetKey);
@@ -227,6 +245,10 @@ function computeCost(ev, card, targetProvider) {
     rate_cache_read: cacheReadRate,
     rate_cache_write_5m: cacheWriteRate,
     rate_cache_write_1h: cacheWrite1hRate,
+    // The moment these rates were captured (plans/004). Stored so a valuation
+    // can be dated: an event priced at ingest carries ~= its own ts, whereas a
+    // scenario added months later visibly does not.
+    priced_at: new Date().toISOString(),
   };
 }
 
@@ -243,6 +265,10 @@ function nullRates() {
     rate_cache_read: null,
     rate_cache_write_5m: null,
     rate_cache_write_1h: null,
+    // Set even with no rates: we DID look, at this moment, and found none.
+    // That is a dated fact worth keeping — it is what tells you an unpriced row
+    // is a `reprice` candidate rather than something never examined.
+    priced_at: new Date().toISOString(),
   };
 }
 

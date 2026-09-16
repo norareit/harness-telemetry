@@ -196,11 +196,31 @@ the view recomputes with `(output_tokens + reasoning_tokens)`.
 Rates are nullable on purpose: a row priced with no rate card has *unknown* rates, and
 `0` would be a lie that silently passes the audit.
 
-**`sync` reprices.** Extraction is still incremental (byte-offset cursors), but every
-stored event is re-costed at current rates each run, so a `models.json` update is picked
-up rather than freezing until the next `backfill`. The stored rates are what make this
-safe — a reprice shows up in the `rate_*` columns instead of silently moving historical
-totals.
+**Prices are frozen at ingest.** An event is costed once, when it is first extracted, and
+never recomputed. Postgres is a **ledger of what each request would have cost when it
+happened** — a vendor changing its prices does not rewrite your history.
+
+`priced_at` records when each valuation was made. For a normally-ingested event it lands
+close to `ts`; `NULL` means the row was valued before this rule existed and the date is
+not recoverable. A scenario added long after the fact carries a `priced_at` far later than
+its event's `ts`, which is the visible marker that the counterfactual could **not** use
+contemporaneous rates — no archive of past rate tables exists to price it against.
+
+*"What would this cost at today's rates"* is still answerable, on demand and without
+mutating anything, via `harness-usage compare`.
+
+Deliberate correction — after fixing a pricing bug or adding an override — is explicit:
+
+```sh
+harness-usage reprice --dry-run                  # what would change, writes nothing
+harness-usage reprice --unpriced-only            # events that never got a rate card
+harness-usage reprice --model openai/gpt-5.6-terra-fast
+harness-usage reprice --scenario openrouter/qwen/qwen3.7-flash   # drop + recompute
+```
+
+Because frozen costs do not self-heal, `doctor` now watches the two things that would
+otherwise rot silently: the age of `models.json` (which OpenCode maintains, not this repo)
+and any pinned override that has diverged from the live table.
 
 ---
 

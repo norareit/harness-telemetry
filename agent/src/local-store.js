@@ -310,6 +310,36 @@ export class LocalStore {
     }
   }
 
+  /**
+   * Predicate `(event, scenario) => boolean`: has this pair already been priced?
+   *
+   * Loaded once into memory (tens of thousands of short keys) so the scenario
+   * pass is a cheap set lookup rather than a query per pair. Returned as a
+   * closure so callers cannot construct outbox keys themselves — see
+   * scenarioRows().
+   */
+  existingScenarioPairs() {
+    const seen = new Set();
+    for (const r of this.db
+      .prepare("SELECT pk, scenario FROM outbox_scenario")
+      .all()) {
+      seen.add(`${r.pk} ${r.scenario}`);
+    }
+    return (ev, scenario) => seen.has(`${eventKey(ev)} ${scenario}`);
+  }
+
+  /**
+   * Drop every stored row for one scenario, so the next sync reprices it from
+   * scratch. The escape hatch for `reprice --scenario`: under the plans/004
+   * freeze a scenario row is otherwise kept forever once written.
+   */
+  dropScenario(scenario) {
+    const r = this.db
+      .prepare("DELETE FROM outbox_scenario WHERE scenario = ?")
+      .run(scenario);
+    return r.changes;
+  }
+
   /** Drop locally-queued rows for scenarios no longer configured. */
   pruneScenarios(keep) {
     const rows = this.db

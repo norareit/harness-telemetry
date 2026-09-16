@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS usage_event (
     rate_cache_write_5m     numeric(12,6),
     rate_cache_write_1h     numeric(12,6),
 
+    -- When the valuation was made (plans/004). A row is priced ONCE, at ingest,
+    -- and never recomputed, so this is normally ~= ts. NULL means the row was
+    -- valued before the freeze existed and the date is not recoverable.
+    priced_at               timestamptz,
+
     synced_at               timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (harness, session_id, message_id)
@@ -148,6 +153,9 @@ CREATE TABLE IF NOT EXISTS usage_scenario (
     rate_cache_read     numeric(12,6),
     rate_cache_write_5m numeric(12,6),
     rate_cache_write_1h numeric(12,6),
+    -- A scenario added long after the event carries a priced_at far later than
+    -- that event's ts: the marker of a NON-contemporaneous counterfactual.
+    priced_at    timestamptz,
     synced_at    timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (harness, session_id, message_id, scenario),

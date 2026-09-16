@@ -43,7 +43,6 @@ export async function runSync({ full = false, noShip = false } = {}) {
     shipped: 0,
     unsynced: 0,
     shipError: null,
-    repriced: 0,
     scenarioRows: 0,
     shippedScenarios: 0,
     unsyncedScenarios: 0,
@@ -101,28 +100,26 @@ export async function runSync({ full = false, noShip = false } = {}) {
       report.extracted[name] = count;
     }
 
-    // --- reprice stored events at current rates (plans/003) ----------------
-    // `sync` is now "incremental extract + full reprice". Extraction still only
-    // reads new bytes, but every stored event is re-costed so a models.json
-    // update is actually picked up instead of freezing until the next backfill.
-    // Storing the applied rates is what makes this safe: a reprice shows up in
-    // the rate_* columns rather than silently moving historical totals.
-    // One transaction for the whole pass: the repricing arithmetic itself is
-    // ~4ms for the full archive, but the per-event SQLite writes cost 26s
-    // unbatched because WAL fsyncs each implicit transaction.
-    store.transaction(() => {
-      for (const ev of [...store.allEvents()]) {
-        const srcCfg = config.sources[ev.harness];
-        const priced = pricing.price(ev, srcCfg?.billing || "free");
-        if (store.record({ ...ev, ...priced }) === "changed") report.repriced++;
-      }
-    });
+    // NOTE (plans/004): there is deliberately NO reprice pass here.
+    //
+    // Events are priced once, in the extraction loop above, and never
+    // recomputed. Postgres is a ledger of what each request would have cost
+    // WHEN IT HAPPENED. plans/003 repriced everything on every run, which meant
+    // a vendor price change silently rewrote history — storing the rates did
+    // not prevent that, because the upsert overwrites rate_* alongside cost_usd.
+    //
+    // "What would this cost at today's rates" is still answerable on demand via
+    // `harness-usage compare`, without mutating anything. Deliberate correction
+    // — a pricing bug, or a newly added override — is `harness-usage reprice`.
 
-    // --- counterfactual scenarios (plans/002) ------------------------------
-    // Derived, not extracted: a pure function of the stored events plus the
-    // price table, so they are recomputed from the whole local archive rather
-    // than only from what this run happened to extract. That way a changed
-    // scenario list or an updated models.json converges on the next run.
+    // --- counterfactual scenarios (plans/002, frozen per plans/004) ---------
+    // Derived, but frozen like events: a pair is priced once and kept. Only
+    // pairs that do not exist yet are computed, so a sync with no new events
+    // does no scenario work at all.
+    //
+    // A scenario added later CANNOT be priced historically — no archive of past
+    // rate tables exists — so such rows carry a priced_at far after their event's
+    // ts. That is the visible marker of a non-contemporaneous comparison.
     const scenarios = config.scenarios || [];
     if (scenarios.length) {
       const pruned = store.pruneScenarios(scenarios);
@@ -135,6 +132,7 @@ export async function runSync({ full = false, noShip = false } = {}) {
         events: store.allEvents(),
         pricing,
         scenarios: scenarios.filter((s) => !unresolved.includes(s)),
+        alreadyPriced: store.existingScenarioPairs(),
       });
       store.recordScenarios(rows);
       report.scenarioRows = rows.length;

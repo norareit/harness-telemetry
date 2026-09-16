@@ -92,10 +92,17 @@ export function compare({ events, pricing, scenarios, groupBy = null, filter = n
  * table. Unresolved targets are skipped entirely — an unpriced scenario must
  * never land in the database looking like a free one.
  */
-export function scenarioRows({ events, pricing, scenarios }) {
+export function scenarioRows({ events, pricing, scenarios, alreadyPriced = null }) {
   const out = [];
   for (const ev of events) {
     for (const s of scenarios) {
+      // Under plans/004 a scenario row is priced once and frozen, so skip pairs
+      // that already exist. `alreadyPriced` is a predicate supplied by
+      // LocalStore rather than a key set built here — the outbox primary key
+      // uses a non-printing separator, and duplicating that construction is
+      // exactly how the two sides would silently drift apart.
+      if (alreadyPriced && alreadyPriced(ev, s)) continue;
+
       const r = pricing.repriceEvent(ev, s);
       if (r.priced_by === "none") continue;
       out.push({
@@ -112,6 +119,7 @@ export function scenarioRows({ events, pricing, scenarios }) {
         rate_cache_read: r.rate_cache_read,
         rate_cache_write_5m: r.rate_cache_write_5m,
         rate_cache_write_1h: r.rate_cache_write_1h,
+        priced_at: r.priced_at,
       });
     }
   }

@@ -37,6 +37,11 @@ const FIELD_ORDER = [
   "rate_cache_read",
   "rate_cache_write_5m",
   "rate_cache_write_1h",
+  // When the rates above were captured (plans/004). For an event priced at
+  // ingest this is ~= ts. For a scenario added later it is visibly much later,
+  // which is the signal that the counterfactual did NOT use contemporaneous
+  // rates — there is no archive of past rate tables to price it against.
+  "priced_at",
 ];
 
 // Fields DERIVED from the source data plus the price table, as opposed to
@@ -54,6 +59,7 @@ export const DERIVED_FIELDS = new Set([
   "rate_cache_read",
   "rate_cache_write_5m",
   "rate_cache_write_1h",
+  "priced_at",
 ]);
 
 // Nullable numerics: null means "not known", which is NOT the same as 0 and
@@ -105,6 +111,10 @@ export function makeEvent(partial) {
 
   e.cache_model = e.cache_model ?? null;
   for (const k of RATE_FIELDS) e[k] = Number.isFinite(e[k]) ? e[k] : null;
+
+  // null means "valued before plans/004 existed, date unknown". Never defaulted
+  // to now() — that would assert a valuation date we do not actually know.
+  e.priced_at = e.priced_at ? toIso(e.priced_at) : null;
 
   return e;
 }

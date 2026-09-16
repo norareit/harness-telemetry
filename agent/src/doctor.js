@@ -230,6 +230,83 @@ export async function runDoctor() {
     }
   }
 
+  // --- price table freshness (plans/004) ---------------------------------
+  // Under the freeze a stale table is PERMANENT damage: every event ingested
+  // while it is stale is valued wrongly forever, with no self-correction on a
+  // later sync. models.json is maintained by OpenCode, not by this repo —
+  // nothing here refreshes it, so running OpenCode is what updates prices.
+  try {
+    const modelsPath = expandHome(config.pricing.modelsJson);
+    const st = await stat(modelsPath);
+    const days = (Date.now() - st.mtimeMs) / 86_400_000;
+    add(
+      "price table freshness",
+      days <= 14,
+      `${modelsPath} last updated ${days.toFixed(1)} days ago` +
+        (days > 14
+          ? " — run OpenCode to refresh it; with prices frozen at ingest, stale rates are baked in permanently"
+          : ""),
+    );
+  } catch (err) {
+    add("price table freshness", false, err.message);
+  }
+
+  // --- override drift ------------------------------------------------------
+  // A pinned override deliberately does not track the table — that is the point
+  // — but silent rot is not. Compare each pin against the live table where the
+  // table actually has an entry.
+  {
+    const drift = [];
+    const pins = Object.entries(pricing.overrides || {});
+    for (const [key, ov] of pins) {
+      const live = pricing.tableCard(key);
+      if (!live) continue; // no table entry is usually *why* it is pinned
+      for (const f of ["input", "output", "cache_read", "cache_write"]) {
+        const pinned = ov[f];
+        const table = live.base[f];
+        if (pinned != null && table != null && Math.abs(pinned - table) > 1e-9) {
+          drift.push(`${key} ${f}: pinned ${pinned} vs table ${table}`);
+        }
+      }
+    }
+    add(
+      "override drift",
+      drift.length === 0,
+      drift.length
+        ? `${drift.join("; ")} — update pricing-overrides.json if the table is now right`
+        : `${pins.length} pinned override(s), none diverging from the table`,
+    );
+  }
+
+  // --- unpriced non-local events ------------------------------------------
+  // Frozen costs do not self-heal, so an event stored with no rate card stays
+  // at $0 until someone runs `reprice`. Local models are legitimately unpriced;
+  // anything else is a candidate for correction once an override is added.
+  {
+    const store = new LocalStore();
+    try {
+      const byModel = new Map();
+      for (const e of store.allEvents()) {
+        if (e.priced_by !== "none") continue;
+        if (e.billing === "local") continue;
+        const k = `${e.provider}/${e.model}`;
+        byModel.set(k, (byModel.get(k) || 0) + 1);
+      }
+      const total = [...byModel.values()].reduce((a, b) => a + b, 0);
+      add(
+        "no unpriced billable events",
+        byModel.size === 0,
+        byModel.size === 0
+          ? "every non-local event carries a rate card"
+          : `${total} events with no rate card: ` +
+            [...byModel].map(([k, n]) => `${k} (${n})`).join(", ") +
+            ` — add to pricing-overrides.json, then 'harness-usage reprice --unpriced-only'`,
+      );
+    } finally {
+      store.close();
+    }
+  }
+
   const seenPairs = await modelsInUse(config);
   const unpriced = pricing.unpricedModels(seenPairs);
   add(
