@@ -34,6 +34,9 @@ try {
     case "compare":
       await cmdCompare();
       break;
+    case "compact-archive":
+      await cmdCompactArchive();
+      break;
     case "doctor":
       await cmdDoctor();
       break;
@@ -113,6 +116,23 @@ async function cmdSync({ full }) {
     );
   } else {
     console.log(`  ship: nothing to send`);
+  }
+}
+
+async function cmdCompactArchive() {
+  const store = new LocalStore();
+  try {
+    const r = store.compactArchive();
+    if (r.removed === 0) {
+      console.log(`archive already compact: ${r.linesAfter} lines across ${r.files} files`);
+      return;
+    }
+    console.log(
+      `compacted ${r.files} files: ${r.linesBefore} -> ${r.linesAfter} lines ` +
+        `(${r.removed} superseded duplicates removed, last-wins per event)`,
+    );
+  } finally {
+    store.close();
   }
 }
 
@@ -284,6 +304,7 @@ function usage() {
   backfill          re-scan everything (ignores cursors), drain the outbox
   show              print the local summary
   compare           reprice stored usage against other models
+  compact-archive   rewrite events/*.jsonl keeping the last line per event
   doctor            preflight + regression checks
 
   --no-ship         sync/backfill: write the local archive only, skip Postgres

@@ -39,6 +39,23 @@ const FIELD_ORDER = [
   "rate_cache_write_1h",
 ];
 
+// Fields DERIVED from the source data plus the price table, as opposed to
+// extracted from the harness. Everything here is recomputable and none of it is
+// load-bearing for durability, which is why the JSONL archive does not re-append
+// a line when only these change — see local-store.js.
+export const DERIVED_FIELDS = new Set([
+  "cost_usd",
+  "billing",
+  "priced_by",
+  "cache_model",
+  "tier_applied",
+  "rate_input",
+  "rate_output",
+  "rate_cache_read",
+  "rate_cache_write_5m",
+  "rate_cache_write_1h",
+]);
+
 // Nullable numerics: null means "not known", which is NOT the same as 0 and
 // must not be coerced to it.
 const RATE_FIELDS = [

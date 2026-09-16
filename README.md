@@ -269,3 +269,28 @@ archives regardless of whether the Pi is reachable.
 
 If `state.sqlite` is ever lost, `harness-usage backfill` rebuilds from the
 harnesses' own files (within their retention) plus the JSONL archive (beyond it).
+
+### Reading the archive correctly
+
+The archive is **append-only, and a line can be superseded**. Read it *last-wins per
+`(harness, session_id, message_id)`* — never as a naive sum:
+
+```sh
+# WRONG — double-counts superseded lines
+jq -s 'map(.cost_usd) | add' events/*.jsonl
+
+# right — last line per event wins
+jq -s 'group_by(.harness + .session_id + .message_id)
+       | map(last) | map(.cost_usd) | add' events/*.jsonl
+```
+
+Postgres is unaffected either way: the sink upserts on the same key, so superseded
+lines collapse onto one row.
+
+A line is appended only when the **extracted** data is new or changed — never for a
+reprice, since costs are derived and recomputable. The consequence is that cost fields
+in an archived line are as-of-first-archival and may be stale; **Postgres is
+authoritative for cost**, the archive for token counts.
+
+`harness-usage compact-archive` rewrites the files keeping the last line per event, if
+duplicates accumulated before this rule existed.

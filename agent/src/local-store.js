@@ -13,11 +13,28 @@
 // SQLite comes from the built-in node:sqlite (Node >=22.5) — no native build.
 
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, appendFileSync } from "node:fs";
+import {
+  mkdirSync,
+  appendFileSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DATA_DIR } from "./config.js";
-import { makeEvent, eventKey, eventDay, FIELD_ORDER } from "./record.js";
+import {
+  makeEvent,
+  eventKey,
+  eventDay,
+  FIELD_ORDER,
+  DERIVED_FIELDS,
+} from "./record.js";
+
+// Prefix on stored archive hashes. Bumped when the hash BASIS changes, so a
+// legacy hash can be recognised and re-stamped without re-appending the line.
+const HASH_VERSION = "v2:";
 
 export class LocalStore {
   constructor({ dataDir = DATA_DIR } = {}) {
@@ -78,22 +95,39 @@ export class LocalStore {
   // --- outbox --------------------------------------------------------------
 
   /**
-   * Record one event: upsert into the outbox (idempotent on PK) and append to
-   * the day's JSONL archive if this exact payload has not been archived before.
-   * A changed payload (e.g. a reprice on backfill) re-appends and re-queues for
-   * shipping; downstream consumers take last-wins by PK. Returns 'new',
-   * 'changed', or 'unchanged'.
+   * Record one event: upsert into the outbox and, when the SOURCE data is new
+   * or changed, append to the day's JSONL archive. Returns 'new', 'changed' or
+   * 'unchanged', describing the shipped payload.
+   *
+   * Two different questions, deliberately answered by two different hashes:
+   *
+   *   re-ship?    any change matters — Postgres must receive corrected costs.
+   *   re-archive? only SOURCE data matters. The archive exists because Claude
+   *               Code prunes transcripts after ~30 days, so its job is
+   *               preserving token counts, which never change. Costs are
+   *               derived and recomputable from them plus the price table.
+   *
+   * Hashing the whole payload for both meant a reprice appended a second line
+   * per event differing only in rate metadata — 4,177 duplicate lines in a
+   * single backfill, and a naive sum over the archive overcounted by 96.8%.
+   * Cost fields in an archived line are therefore as-of-first-archival and may
+   * be stale; Postgres is authoritative for cost.
    */
   record(partial) {
     const ev = makeEvent(partial);
     const key = eventKey(ev);
     const payload = JSON.stringify(orderFields(ev));
-    const hash = createHash("sha1").update(payload).digest("hex");
+    const sourceHash =
+      HASH_VERSION + createHash("sha1").update(sourceOf(ev)).digest("hex");
 
-    const prev = this.db
-      .prepare("SELECT hash FROM archived WHERE pk = ?")
+    const prevOutbox = this.db
+      .prepare("SELECT payload FROM outbox WHERE pk = ?")
       .get(key);
-    const state = !prev ? "new" : prev.hash === hash ? "unchanged" : "changed";
+    const state = !prevOutbox
+      ? "new"
+      : prevOutbox.payload === payload
+        ? "unchanged"
+        : "changed";
 
     this.db
       .prepare(
@@ -105,14 +139,32 @@ export class LocalStore {
       )
       .run(key, ev.harness, ev.device, eventDay(ev), ev.ts, payload);
 
-    if (state !== "unchanged") {
+    const prevArchived = this.db
+      .prepare("SELECT hash FROM archived WHERE pk = ?")
+      .get(key);
+
+    let shouldAppend;
+    if (!prevArchived) {
+      shouldAppend = true;
+    } else if (!prevArchived.hash.startsWith(HASH_VERSION)) {
+      // Legacy full-payload hash: the event is already on disk. Re-stamp it
+      // with a source hash WITHOUT appending — otherwise switching the hash
+      // basis would duplicate every line a second time.
+      shouldAppend = false;
+    } else {
+      shouldAppend = prevArchived.hash !== sourceHash;
+    }
+
+    if (shouldAppend) {
       appendFileSync(join(this.eventsDir, `${eventDay(ev)}.jsonl`), payload + "\n");
+    }
+    if (!prevArchived || prevArchived.hash !== sourceHash) {
       this.db
         .prepare(
           `INSERT INTO archived (pk, hash) VALUES (?, ?)
            ON CONFLICT(pk) DO UPDATE SET hash = excluded.hash`,
         )
-        .run(key, hash);
+        .run(key, sourceHash);
     }
     return state;
   }
@@ -213,6 +265,49 @@ export class LocalStore {
     return stale;
   }
 
+  /**
+   * Rewrite the JSONL archive keeping only the last line per event.
+   *
+   * Needed once, to clean up duplicates written before record() split the
+   * archive hash from the ship hash. Last-wins matches how every consumer is
+   * meant to read the archive, and the duplicate lines differ only in derived
+   * pricing metadata, so nothing extracted is lost.
+   *
+   * Rewrites each day file atomically (temp file + rename).
+   */
+  compactArchive() {
+    const files = readdirSync(this.eventsDir).filter((f) => f.endsWith(".jsonl"));
+    let linesBefore = 0;
+    let linesAfter = 0;
+
+    for (const f of files) {
+      const path = join(this.eventsDir, f);
+      const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
+      linesBefore += lines.length;
+
+      const lastByKey = new Map();
+      for (const line of lines) {
+        try {
+          const e = JSON.parse(line);
+          lastByKey.set(eventKey(e), line);
+        } catch {
+          // Unparseable line: keep it rather than silently discard data.
+          lastByKey.set(`__raw__${lastByKey.size}`, line);
+        }
+      }
+
+      const out = [...lastByKey.values()];
+      linesAfter += out.length;
+      if (out.length === lines.length) continue;
+
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, out.join("\n") + "\n");
+      renameSync(tmp, path);
+    }
+
+    return { files: files.length, linesBefore, linesAfter, removed: linesBefore - linesAfter };
+  }
+
   // --- reporting -----------------------------------------------------------
 
   summary() {
@@ -266,6 +361,17 @@ function orderFields(ev) {
   const out = {};
   for (const k of FIELD_ORDER) out[k] = ev[k];
   return out;
+}
+
+/**
+ * Canonical JSON of the EXTRACTED fields only — everything the harness told us,
+ * with the derived pricing fields removed. This is what decides whether a line
+ * is appended to the archive.
+ */
+function sourceOf(ev) {
+  const out = {};
+  for (const k of FIELD_ORDER) if (!DERIVED_FIELDS.has(k)) out[k] = ev[k];
+  return JSON.stringify(out);
 }
 
 function migrate(db) {
