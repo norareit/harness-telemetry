@@ -1,6 +1,6 @@
 [Unit]
 Description=Run harness usage telemetry sync every 5 minutes
-Documentation=https://github.com/stef/harness-telemetry
+Documentation=https://bitbucket.org/ritenoar/harness-telemetry
 
 [Timer]
 OnBootSec=2min

@@ -1,6 +1,6 @@
 [Unit]
 Description=Harness usage telemetry sync (Claude Code + OpenCode -> Postgres)
-Documentation=https://github.com/stef/harness-telemetry
+Documentation=https://bitbucket.org/ritenoar/harness-telemetry
 After=network-online.target
 Wants=network-online.target
 
