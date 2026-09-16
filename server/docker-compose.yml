@@ -2,7 +2,7 @@
 # Both images are multi-arch and run on the Pi's arm64.
 #
 # Ports are bound to the Tailscale IP ONLY (see TAILSCALE_IP in .env), so nothing
-# is exposed to the LAN or the internet. Reach Grafana at http://raspberrypi:3000
+# is exposed to the LAN or the internet. Reach Grafana at http://rpi5:3000
 # from any tailnet device.
 
 name: harness-telemetry

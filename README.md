@@ -16,7 +16,7 @@ archive is written even with no network, and a backlog drains on the next run.
   ~/.cache/opencode/models.json ─┘         │  every 5 min      │       events/YYYY-MM-DD.jsonl
                                            │                   │       state.sqlite (cursors + outbox)
                                            ▼                   │
-                              Postgres 17 on raspberrypi  ◀────┘   (Tailscale, idempotent upsert)
+                              Postgres 17 on rpi5         ◀────┘   (Tailscale, idempotent upsert)
                                            ▼
                                    Grafana dashboard
 ```
@@ -143,13 +143,13 @@ token), or `local` (`ollama`, genuinely $0). Set per source in `config.json`.
 
 ## Pi stack (you deploy this)
 
-On `raspberrypi`, with Docker + compose installed:
+On `rpi5`, with Docker + compose installed:
 
 ```sh
 cd server
 cp .env.example .env
 $EDITOR .env        # set POSTGRES_PASSWORD, GRAFANA_ADMIN_PASSWORD;
-                    # TAILSCALE_IP defaults to the Pi's 100.x.y.z (`tailscale ip -4`)
+                    # TAILSCALE_IP defaults to rpi5's 100.x.y.z (`tailscale ip -4`)
 docker compose up -d
 docker compose ps
 docker compose logs -f grafana
@@ -161,7 +161,7 @@ docker compose logs -f grafana
 * `grafana/grafana:11.4.0` — datasource and the `harness-usage` dashboard are
   provisioned from `grafana/provisioning/`, so it comes up populated.
 * Both ports are published on `${TAILSCALE_IP}` only — not the LAN, not the
-  internet. Open `http://raspberrypi:3000` from any tailnet device.
+  internet. Open `http://rpi5:3000` from any tailnet device.
 
 Verify the binding is tailnet-only:
 

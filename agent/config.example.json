@@ -4,7 +4,7 @@
   "device": "desktop",
 
   "postgres": {
-    "//": "The Pi over Tailscale. Password is the POSTGRES_PASSWORD from server/.env.",
+    "//": "rpi5 over Tailscale. Password is the POSTGRES_PASSWORD from server/.env.",
     "dsn": "postgres://harness:CHANGE_ME@100.x.y.z:5432/harness",
     "connectionTimeoutMillis": 10000,
     "statementTimeoutMillis": 30000
