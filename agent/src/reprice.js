@@ -107,6 +107,11 @@ export function scenarioRows({ events, pricing, scenarios }) {
         cache_model: r.cache_model,
         priced_by: r.priced_by,
         tier_applied: r.tier_applied,
+        rate_input: r.rate_input,
+        rate_output: r.rate_output,
+        rate_cache_read: r.rate_cache_read,
+        rate_cache_write_5m: r.rate_cache_write_5m,
+        rate_cache_write_1h: r.rate_cache_write_1h,
       });
     }
   }

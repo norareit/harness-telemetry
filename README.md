@@ -165,6 +165,33 @@ input + output + reasoning + cache_read`), billed at the output rate — so
 `billing` is `free` (subscription — Stef's Max / OpenCode auth), `api` (paid per
 token), or `local` (`ollama`, genuinely $0). Set per source in `config.json`.
 
+### Stored rates and the cost audit
+
+Every row also stores the rate card that was **actually applied** — `rate_input`,
+`rate_output`, `rate_cache_read`, `rate_cache_write_5m`, `rate_cache_write_1h`, plus
+`cache_model` and `tier_applied`. These are post-tier-selection and post-fallback, so
+they can differ from `models.json` as written: a model with no `cache_read` has its
+cache reads billed at the input rate, and Anthropic 1h writes are `2 × input`.
+
+That makes `cost_usd` reproducible from stored data alone:
+
+```sql
+SELECT count(*) FROM usage_cost_audit WHERE abs(drift_usd) > 0.000001;  -- expect 0
+```
+
+This is the only invariant in the system checkable **without trusting the agent that
+produced the number**. It also permanently guards the reasoning-token regression, since
+the view recomputes with `(output_tokens + reasoning_tokens)`.
+
+Rates are nullable on purpose: a row priced with no rate card has *unknown* rates, and
+`0` would be a lie that silently passes the audit.
+
+**`sync` reprices.** Extraction is still incremental (byte-offset cursors), but every
+stored event is re-costed at current rates each run, so a `models.json` update is picked
+up rather than freezing until the next `backfill`. The stored rates are what make this
+safe — a reprice shows up in the `rate_*` columns instead of silently moving historical
+totals.
+
 ---
 
 ## Pi stack (you deploy this)
@@ -182,8 +209,18 @@ docker compose logs -f grafana
 ```
 
 * `postgres:17-alpine` — schema in `postgres/init/01-schema.sql` is applied on first
-  boot (fresh volume only; to re-apply after a change, `docker compose down -v` or
-  run the file with `psql`). Session / day / project rollups are **views**.
+  boot (fresh volume only). Session / day / project rollups are **views**.
+* **Schema changes to an existing database** go in `postgres/migrations/`, because
+  `postgres/init/` only ever runs against an empty data directory. `harness-usage doctor`
+  reports missing tables *and* missing columns, and points here. Apply with:
+
+  ```sh
+  docker compose exec -T postgres psql -U harness -d harness \
+    < postgres/migrations/001-add-rates.sql
+  ```
+
+  Migrations are idempotent and non-destructive. Reach for `down -v` only when you
+  actually intend to destroy stored history.
 * `grafana/grafana:11.4.0` — datasource and the `harness-usage` dashboard are
   provisioned from `grafana/provisioning/`, so it comes up populated.
 * Both ports are published on `${TAILSCALE_IP}` only — not the LAN, not the

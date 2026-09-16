@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { loadConfig, expandHome, CONFIG_PATH, DATA_DIR } from "./config.js";
+import { LocalStore } from "./local-store.js";
 import { loadPricing } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
 import { reconcile } from "./sources/opencode.js";
@@ -164,6 +165,55 @@ export async function runDoctor() {
     );
   }
 
+  // Cost must be reproducible from the stored inputs alone (plans/003). This is
+  // the one invariant that does not require trusting the pricing code path that
+  // produced the number — it recomputes from the persisted rates and compares.
+  {
+    const store = new LocalStore();
+    try {
+      let total = 0;
+      let checked = 0;
+      let bad = 0;
+      let unrated = 0;
+      let firstBad = null;
+      for (const e of store.allEvents()) {
+        total++;
+        if (e.rate_input == null) {
+          // No rate card at all (ollama and friends): genuinely unpriceable, not
+          // stale. Must not be reported as something a backfill would fix.
+          if (e.priced_by === "none") unrated++;
+          continue;
+        }
+        checked++;
+        const recomputed =
+          (e.input_tokens * e.rate_input +
+            (e.output_tokens + e.reasoning_tokens) * e.rate_output +
+            e.cache_read_tokens * e.rate_cache_read +
+            e.cache_write_5m_tokens * e.rate_cache_write_5m +
+            e.cache_write_1h_tokens * e.rate_cache_write_1h) /
+          1e6;
+        if (Math.abs(recomputed - e.cost_usd) > 1e-6) {
+          bad++;
+          firstBad ??= `${e.message_id}: stored $${e.cost_usd} vs recomputed $${recomputed.toFixed(6)}`;
+        }
+      }
+      add(
+        "cost reproducible from stored rates",
+        bad === 0,
+        total === 0
+          ? "no events stored yet"
+          : `${checked}/${total} events carry rates; ${bad} mismatch` +
+            (firstBad ? ` — e.g. ${firstBad}` : "") +
+            (unrated ? `; ${unrated} have no rate card (local/unpriced — expected)` : "") +
+            (total - checked - unrated > 0
+              ? `; ${total - checked - unrated} priced but missing rates — run backfill`
+              : ""),
+      );
+    } finally {
+      store.close();
+    }
+  }
+
   const seenPairs = await modelsInUse(config);
   const unpriced = pricing.unpricedModels(seenPairs);
   add(
@@ -180,16 +230,24 @@ export async function runDoctor() {
     try {
       sink = new PostgresSink(config);
       const ok = await sink.ping();
-      const missing = await sink.missingTables();
+      const { missingTables, missingColumns } = await sink.schemaGaps();
       add("postgres connection", ok, redactDsn(config.postgres.dsn));
+
+      const gaps = [];
+      if (missingTables.length) gaps.push(`tables: ${missingTables.join(", ")}`);
+      if (missingColumns.length) {
+        gaps.push(
+          `columns: ${missingColumns.map((m) => `${m.table}.${m.column}`).join(", ")}`,
+        );
+      }
       add(
         "postgres schema",
-        missing.length === 0,
-        missing.length === 0
-          ? "usage_event, usage_scenario present"
-          : `missing: ${missing.join(", ")} — the init script only runs on an empty ` +
-            `volume, so apply server/postgres/init/01-schema.sql by hand, or ` +
-            `re-init with 'docker compose down -v && docker compose up -d' (destroys stored history)`,
+        gaps.length === 0,
+        gaps.length === 0
+          ? "usage_event, usage_scenario complete"
+          : `missing ${gaps.join("; ")} — postgres/init only runs on an empty volume, ` +
+            `so apply server/postgres/migrations/ to an existing database ` +
+            `(psql -f). Do NOT 'down -v' unless you mean to destroy stored history.`,
       );
     } catch (err) {
       add("postgres connection", false, `${redactDsn(config.postgres.dsn)}: ${err.message}`);

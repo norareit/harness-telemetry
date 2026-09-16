@@ -120,11 +120,12 @@ export class Pricing {
         billing: local ? "local" : sourceBilling,
         priced_by: "none",
         cache_model: "none",
+        ...nullRates(),
       };
     }
 
-    const { cost_usd, cache_model } = computeCost(ev, card, ev.provider);
-    return { cost_usd, billing: sourceBilling, priced_by: source, cache_model };
+    const computed = computeCost(ev, card, ev.provider);
+    return { ...computed, billing: sourceBilling, priced_by: source };
   }
 
   /**
@@ -139,12 +140,12 @@ export class Pricing {
         cost_usd: 0,
         cache_model: "none",
         priced_by: "none",
-        tier_applied: null,
         scenario: targetKey,
+        ...nullRates(),
       };
     }
-    const { cost_usd, cache_model, tier_applied } = computeCost(ev, card, provider);
-    return { cost_usd, cache_model, priced_by: source, tier_applied, scenario: targetKey };
+    const computed = computeCost(ev, card, provider);
+    return { ...computed, priced_by: source, scenario: targetKey };
   }
 
   /** All provider/model pairs that resolve to no rate card. */
@@ -196,7 +197,35 @@ function computeCost(ev, card, targetProvider) {
       ev.cache_write_1h_tokens * cacheWrite1hRate) /
     1e6;
 
-  return { cost_usd: round6(cost), cache_model, tier_applied: tierSize };
+  // The APPLIED rates are returned, not the card as written: tier selection and
+  // the cache fallbacks above mean they routinely differ, and only the applied
+  // values can reproduce cost_usd (see plans/003).
+  return {
+    cost_usd: round6(cost),
+    cache_model,
+    tier_applied: tierSize,
+    rate_input: rates.input,
+    rate_output: rates.output,
+    rate_cache_read: cacheReadRate,
+    rate_cache_write_5m: cacheWriteRate,
+    rate_cache_write_1h: cacheWrite1hRate,
+  };
+}
+
+/**
+ * The "rates unknown" shape. Deliberately null rather than 0 — a row priced
+ * with no rate card has UNKNOWN rates, and zeros would be a lie that silently
+ * satisfies the usage_cost_audit reconciliation.
+ */
+function nullRates() {
+  return {
+    tier_applied: null,
+    rate_input: null,
+    rate_output: null,
+    rate_cache_read: null,
+    rate_cache_write_5m: null,
+    rate_cache_write_1h: null,
+  };
 }
 
 /** Highest tier whose size is exceeded; base rates when none apply. */

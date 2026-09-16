@@ -89,6 +89,9 @@ async function cmdSync({ full }) {
   if (r.unpriced.length) {
     console.log(`  unpriced models: ${r.unpriced.join(", ")}`);
   }
+  if (r.repriced) {
+    console.log(`  repriced: ${r.repriced} stored events changed cost at current rates`);
+  }
   if (r.scenarioRows) {
     console.log(`  scenarios: ${r.scenarioRows} rows across the configured targets`);
   }

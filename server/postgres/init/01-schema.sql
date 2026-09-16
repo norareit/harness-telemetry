@@ -31,6 +31,20 @@ CREATE TABLE IF NOT EXISTS usage_event (
     priced_by               text        NOT NULL DEFAULT 'none' -- 'table' | 'override' | 'none'
                               CHECK (priced_by IN ('table', 'override', 'none')),
 
+    -- The rate card actually APPLIED (plans/003): post-tier-selection and
+    -- post-fallback, USD per 1e6 tokens. Storing these makes cost_usd
+    -- reproducible from stored data (see usage_cost_audit) and makes a
+    -- models.json price change visible instead of a silent step in the totals.
+    -- Nullable on purpose: a row priced with no rate card has UNKNOWN rates,
+    -- and 0 would be a lie that satisfies the audit check.
+    cache_model             text        CHECK (cache_model IN ('full', 'read-only', 'none')),
+    tier_applied            bigint,
+    rate_input              numeric(12,6),
+    rate_output             numeric(12,6),
+    rate_cache_read         numeric(12,6),
+    rate_cache_write_5m     numeric(12,6),
+    rate_cache_write_1h     numeric(12,6),
+
     synced_at               timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (harness, session_id, message_id)
@@ -128,6 +142,12 @@ CREATE TABLE IF NOT EXISTS usage_scenario (
     priced_by    text NOT NULL DEFAULT 'none'
                    CHECK (priced_by IN ('table', 'override', 'none')),
     tier_applied bigint,                     -- context-tier size in effect, or NULL
+    -- Applied rates, as on usage_event (plans/003).
+    rate_input          numeric(12,6),
+    rate_output         numeric(12,6),
+    rate_cache_read     numeric(12,6),
+    rate_cache_write_5m numeric(12,6),
+    rate_cache_write_1h numeric(12,6),
     synced_at    timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (harness, session_id, message_id, scenario),
@@ -187,3 +207,42 @@ JOIN usage_scenario s
   ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id
 WHERE e.billing = 'local' AND s.priced_by <> 'none'
 GROUP BY s.scenario, s.cache_model, e.device;
+
+-- ---------------------------------------------------------------------------
+-- Cost audit (plans/003)
+--
+-- Recomputes cost_usd from the stored token counts and the stored applied
+-- rates. Any row where the two disagree is a bug in the agent or a corrupted
+-- write. This is the only invariant in the system that can be checked WITHOUT
+-- trusting the client that produced the number.
+--
+-- Note the (output_tokens + reasoning_tokens) term: reasoning is normalized out
+-- of output_tokens at extraction and billed at the output rate, which is exactly
+-- the regression that once billed Anthropic thinking tokens at $0. It is now
+-- permanently guarded here, in SQL, not only by a unit probe in the agent.
+
+CREATE OR REPLACE VIEW usage_cost_audit AS
+SELECT
+    harness,
+    device,
+    session_id,
+    message_id,
+    ts,
+    model,
+    cache_model,
+    tier_applied,
+    cost_usd,
+    round(( input_tokens                          * rate_input
+          + (output_tokens + reasoning_tokens)    * rate_output
+          + cache_read_tokens                     * rate_cache_read
+          + cache_write_5m_tokens                 * rate_cache_write_5m
+          + cache_write_1h_tokens                 * rate_cache_write_1h
+          ) / 1e6, 6) AS recomputed_usd,
+    cost_usd - round(( input_tokens                       * rate_input
+                     + (output_tokens + reasoning_tokens) * rate_output
+                     + cache_read_tokens                  * rate_cache_read
+                     + cache_write_5m_tokens              * rate_cache_write_5m
+                     + cache_write_1h_tokens              * rate_cache_write_1h
+                     ) / 1e6, 6) AS drift_usd
+FROM usage_event
+WHERE rate_input IS NOT NULL;

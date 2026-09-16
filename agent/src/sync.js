@@ -43,6 +43,7 @@ export async function runSync({ full = false, noShip = false } = {}) {
     shipped: 0,
     unsynced: 0,
     shipError: null,
+    repriced: 0,
     scenarioRows: 0,
     shippedScenarios: 0,
     unsyncedScenarios: 0,
@@ -78,17 +79,30 @@ export async function runSync({ full = false, noShip = false } = {}) {
           report.unpriced.add(`${raw.provider}/${raw.model}`);
         }
 
+        // Spread the whole priced result: cost, billing, priced_by, and the
+        // applied rate card (cache_model / tier_applied / rate_*). An earlier
+        // version cherry-picked three fields and silently dropped the rest.
         const state = store.record({
           ...raw,
           device: config.device,
-          cost_usd: priced.cost_usd,
-          billing: priced.billing,
-          priced_by: priced.priced_by,
+          ...priced,
         });
         report.recorded[state]++;
         count++;
       }
       report.extracted[name] = count;
+    }
+
+    // --- reprice stored events at current rates (plans/003) ----------------
+    // `sync` is now "incremental extract + full reprice". Extraction still only
+    // reads new bytes, but every stored event is re-costed so a models.json
+    // update is actually picked up instead of freezing until the next backfill.
+    // Storing the applied rates is what makes this safe: a reprice shows up in
+    // the rate_* columns rather than silently moving historical totals.
+    for (const ev of [...store.allEvents()]) {
+      const srcCfg = config.sources[ev.harness];
+      const priced = pricing.price(ev, srcCfg?.billing || "free");
+      if (store.record({ ...ev, ...priced }) === "changed") report.repriced++;
     }
 
     // --- counterfactual scenarios (plans/002) ------------------------------

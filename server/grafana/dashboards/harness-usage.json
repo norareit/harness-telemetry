@@ -308,6 +308,37 @@
           "rawSql": "SELECT DISTINCT ON (project)\n  regexp_replace(project, '^.*/', '') AS project,\n  scenario,\n  cache_model,\n  actual_cost_usd,\n  scenario_cost_usd,\n  delta_usd\nFROM usage_scenario_project\nWHERE harness IN ($harness)\nORDER BY project, scenario_cost_usd ASC"
         }
       ]
+    },
+    {
+      "id": 43,
+      "title": "Effective rates applied, by model",
+      "description": "The per-million-token rates actually used to compute cost. A step here is a models.json price change, not a change in your behaviour — which is precisely what storing the rates makes visible.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 3,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, model || ' · output' AS metric, avg(rate_output) AS value FROM usage_event WHERE $__timeFilter(ts) AND rate_output IS NOT NULL AND device IN ($device) AND harness IN ($harness) GROUP BY 1, 2 ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, model || ' · input' AS metric, avg(rate_input) AS value FROM usage_event WHERE $__timeFilter(ts) AND rate_input IS NOT NULL AND device IN ($device) AND harness IN ($harness) GROUP BY 1, 2 ORDER BY 1"
+        }
+      ]
     }
   ]
 }

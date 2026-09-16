@@ -27,6 +27,27 @@ const FIELD_ORDER = [
   "cost_usd",
   "billing", // 'api' | 'local' | 'free'
   "priced_by", // 'table' | 'override' | 'none'
+  // The rate card actually applied (plans/003), so cost_usd is reproducible
+  // from stored data alone. These are post-tier, post-fallback values — see
+  // computeCost in pricing.js — and USD per 1e6 tokens like everywhere else.
+  "cache_model", // 'full' | 'read-only' | 'none'
+  "tier_applied", // context-tier size in effect, or null
+  "rate_input",
+  "rate_output",
+  "rate_cache_read",
+  "rate_cache_write_5m",
+  "rate_cache_write_1h",
+];
+
+// Nullable numerics: null means "not known", which is NOT the same as 0 and
+// must not be coerced to it.
+const RATE_FIELDS = [
+  "tier_applied",
+  "rate_input",
+  "rate_output",
+  "rate_cache_read",
+  "rate_cache_write_5m",
+  "rate_cache_write_1h",
 ];
 
 const INT_FIELDS = [
@@ -64,6 +85,9 @@ export function makeEvent(partial) {
   e.cost_usd = Number.isFinite(e.cost_usd) ? e.cost_usd : 0;
   e.billing = e.billing ?? "free";
   e.priced_by = e.priced_by ?? "none";
+
+  e.cache_model = e.cache_model ?? null;
+  for (const k of RATE_FIELDS) e[k] = Number.isFinite(e[k]) ? e[k] : null;
 
   return e;
 }

@@ -66,6 +66,32 @@ export class PostgresSink {
   }
 
   /**
+   * Missing tables AND missing columns. Columns matter for the same reason
+   * tables do: postgres/init only runs on an empty volume, so a database
+   * created before a schema addition looks healthy right up until a write
+   * fails on an unknown column — halfway through, after the events committed.
+   */
+  async schemaGaps() {
+    const missingTables = await this.missingTables();
+    const expected = {
+      usage_event: COLUMNS,
+      usage_scenario: SCENARIO_COLUMNS,
+    };
+    const missingColumns = [];
+    for (const [table, cols] of Object.entries(expected)) {
+      if (missingTables.includes(table)) continue;
+      const { rows } = await this.pool.query(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = $1`,
+        [table],
+      );
+      const present = new Set(rows.map((r) => r.column_name));
+      for (const c of cols) if (!present.has(c)) missingColumns.push({ table, column: c });
+    }
+    return { missingTables, missingColumns };
+  }
+
+  /**
    * Upsert a batch of canonical events. Returns the number of rows sent.
    * Throws on any failure so the caller leaves them unsynced for the next run.
    */
@@ -143,6 +169,11 @@ const SCENARIO_COLUMNS = [
   "cache_model",
   "priced_by",
   "tier_applied",
+  "rate_input",
+  "rate_output",
+  "rate_cache_read",
+  "rate_cache_write_5m",
+  "rate_cache_write_1h",
 ];
 
 const SCENARIO_UPDATE_SET = SCENARIO_COLUMNS.filter(
