@@ -25,7 +25,8 @@ archive is written even with no network, and a backlog drains on the next run.
 
 | Path | What |
 |---|---|
-| `agent/` | the per-device sync agent (Node ≥22.5, one dependency: `pg`) |
+| `agent/` | the per-device sync agent (Node ≥22.13, one dependency: `pg`) |
+| `agent/scripts/` | one-off repairs for already-recorded state — see its README |
 | `server/` | `docker compose` stack for the Pi: Postgres + Grafana, provisioned |
 | `plans/001-harness-usage-telemetry.md` | the design + the research it is based on |
 
@@ -45,10 +46,17 @@ cp config.example.json ~/.config/harness-usage/config.json
 $EDITOR ~/.config/harness-usage/config.json   # set device name + Postgres DSN
 ```
 
+**Set `device` before the first sync.** It defaults to the hostname, but a
+config copied from another machine keeps that machine's name, and every row
+ships under it — `agent/scripts/retag-device.mjs` exists to clean that up.
+
 `bin/harness-usage` is a POSIX-sh wrapper that resolves `node` at run time (PATH,
-then `nvm.sh`, then the newest `~/.nvm/.../node`). **Always invoke the wrapper**,
-never `node src/cli.js` directly — systemd and launchd do not get an nvm `node` on
-their `PATH`, and a version-pinned nvm path breaks on the next `nvm install`.
+then `nvm.sh`, then the newest `~/.nvm/.../node`), skipping any candidate whose
+`node:sqlite` is missing — that needs Node ≥22.13, and an older one fails at
+import with `ERR_UNKNOWN_BUILTIN_MODULE` before the agent can explain itself.
+**Always invoke the wrapper**, never `node src/cli.js` directly — systemd and
+launchd do not get an nvm `node` on their `PATH`, and a version-pinned nvm path
+breaks on the next `nvm install`.
 
 ### Commands
 

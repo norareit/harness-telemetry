@@ -35,7 +35,9 @@ import {
 
 // Prefix on stored archive hashes. Bumped when the hash BASIS changes, so a
 // legacy hash can be recognised and re-stamped without re-appending the line.
-const HASH_VERSION = "v2:";
+// Exported so a repair script can recompute an archive hash the same way rather
+// than hardcoding the version and silently producing hashes record() rejects.
+export const HASH_VERSION = "v2:";
 
 export class LocalStore {
   constructor({ dataDir = DATA_DIR } = {}) {
