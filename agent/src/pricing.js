@@ -84,8 +84,13 @@ export class Pricing {
     if (this.overrides[key]) {
       return { card: toCard(this.overrides[key]), source: "override" };
     }
+    // Provider-scoped lookups ONLY. A global bare-name fallback used to live
+    // here and silently matched across providers: ollama/qwen3.6:27b resolved
+    // to an unrelated "pendra" entry that happened to share the bare name,
+    // which reclassified 26 local events as billable. In a 7,800-model table,
+    // bare names are not unique and must never be trusted on their own.
     const entry =
-      this._index.get(key) || this._index.get(model) || this._index.get(bareOf(model));
+      this._index.get(key) || this._index.get(`${provider}/${bareOf(model)}`);
     if (entry && entry.cost) {
       return { card: toCard(entry.cost), source: "table" };
     }
@@ -111,13 +116,26 @@ export class Pricing {
    *   paid for. Unpriced local models always report billing 'local'.
    */
   price(ev, sourceBilling = "free") {
+    // Local inference runs on hardware you already own: it is $0 by definition,
+    // and that must not depend on whether the price table happens to contain a
+    // matching name. Checked BEFORE resolve() so no rate card — coincidental or
+    // deliberate — can ever attribute spend to it.
+    if (isLocalProvider(ev.provider)) {
+      return {
+        cost_usd: 0,
+        billing: "local",
+        priced_by: "none",
+        cache_model: "none",
+        ...nullRates(),
+      };
+    }
+
     const { card, source } = this.resolve(ev.provider, ev.model);
 
     if (!card) {
-      const local = isLocalProvider(ev.provider);
       return {
         cost_usd: 0,
-        billing: local ? "local" : sourceBilling,
+        billing: sourceBilling,
         priced_by: "none",
         cache_model: "none",
         ...nullRates(),
@@ -250,8 +268,9 @@ function cacheModelOf(rates) {
 function buildIndex(table) {
   // models.json shape: { <providerId>: { models: { <modelKey>: {cost,...} } } }
   // modelKey is bare ("gpt-5.6-sol") for some providers and namespaced
-  // ("qwen/qwen3.7-flash") for aggregators. Index every form we might be asked
-  // for: "<provider>/<modelKey>", "<provider>/<bare>", "<modelKey>", "<bare>".
+  // ("qwen/qwen3.7-flash") for aggregators, so index both forms — but ALWAYS
+  // scoped to the provider. Unscoped bare names are not unique across 7,800
+  // models and caused a cross-provider mismatch when they were indexed.
   const idx = new Map();
   for (const [providerId, provider] of Object.entries(table || {})) {
     const models = provider && provider.models;
@@ -260,8 +279,6 @@ function buildIndex(table) {
       const bare = bareOf(modelKey);
       idx.set(`${providerId}/${modelKey}`, entry);
       if (!idx.has(`${providerId}/${bare}`)) idx.set(`${providerId}/${bare}`, entry);
-      if (!idx.has(modelKey)) idx.set(modelKey, entry);
-      if (!idx.has(bare)) idx.set(bare, entry);
     }
   }
   return idx;

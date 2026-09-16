@@ -8,7 +8,22 @@
     "pricing.js computes it as 2x input. An entry with all-zero rates is a valid way to",
     "declare a model genuinely free (priced_by stays 'override', billing per source)."
   ],
+  "//openai/gpt-5.6-terra-fast": [
+    "models.json has NO gpt-5.6-terra-fast under the 'openai' provider — only",
+    "gpt-5.6-terra at 2/12. The model is listed once in the whole table, as",
+    "'vercel :: openai/gpt-5.6-terra-fast', and these are that listing's rates.",
+    "Pinned here because it was previously found by an unscoped bare-name lookup",
+    "that also mismatched ollama models across providers; that fallback is gone.",
+    "Caveat: this is Vercel's gateway price, not an OpenAI direct rate, so it is",
+    "not strictly like-for-like with the other rows. Replace if OpenAI lists it."
+  ],
   "overrides": {
-    "opencode/big-pickle": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 }
+    "opencode/big-pickle": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
+    "openai/gpt-5.6-terra-fast": {
+      "input": 4,
+      "output": 24,
+      "cache_read": 0.4,
+      "cache_write": 5
+    }
   }
 }
