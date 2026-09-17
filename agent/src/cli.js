@@ -15,8 +15,8 @@ import { runDoctor } from "./doctor.js";
 import { LocalStore } from "./local-store.js";
 import { loadConfig, CONFIG_PATH } from "./config.js";
 import { loadPricing } from "./pricing.js";
-import { compare, GROUP_KEYS } from "./reprice.js";
-import { DERIVED_FIELDS } from "./record.js";
+import { compare, GROUP_KEYS } from "./counterfactual.js";
+import { planRevaluation, applyRevaluation } from "./valuation.js";
 
 const [cmd, ...args] = process.argv.slice(2);
 const opts = parseArgs(args);
@@ -207,17 +207,12 @@ async function cmdReprice() {
       return;
     }
 
-    let examined = 0;
-    const updates = [];
-    for (const ev of store.allEvents()) {
-      if (opts.model && `${ev.provider}/${ev.model}` !== opts.model) continue;
-      if (opts.unpricedOnly && ev.priced_by !== "none") continue;
-      examined++;
-
-      const srcCfg = config.sources[ev.harness];
-      const priced = pricing.price(ev, srcCfg?.billing || "free");
-      if (valuationMoved(ev, priced)) updates.push({ ev, priced });
-    }
+    const { examined, updates, deltaUsd: delta } = planRevaluation({
+      store,
+      pricing,
+      config,
+      scope: { model: opts.model, unpricedOnly: opts.unpricedOnly },
+    });
 
     const scope =
       (opts.model ? ` model=${opts.model}` : "") +
@@ -227,10 +222,6 @@ async function cmdReprice() {
       return;
     }
 
-    const delta = updates.reduce(
-      (s, u) => s + (u.priced.cost_usd || 0) - (u.ev.cost_usd || 0),
-      0,
-    );
     const sample = updates
       .slice(0, 3)
       .map(
@@ -246,9 +237,7 @@ async function cmdReprice() {
       return;
     }
 
-    store.transaction(() => {
-      for (const { ev, priced } of updates) store.record({ ...ev, ...priced });
-    });
+    applyRevaluation({ store, updates });
     console.log(
       `repriced ${updates.length}/${examined} events, net $${delta.toFixed(2)}; ` +
         `queued for shipping\n  e.g. ${sample.join("\n       ")}`,
@@ -451,33 +440,6 @@ async function cmdDoctor() {
   }
   console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
   if (failed) process.exit(1);
-}
-
-/**
- * Has the whole valuation moved, not just the headline cost?
- *
- * Compares every DERIVED_FIELDS value except priced_at (which is set fresh on
- * every reprice and so always "moves"). Earlier this looked only at cost_usd
- * and priced_by, so a billing change was never re-applied (review finding C2)
- * and a pre-plan-003 row with null rates but an unchanged price could never be
- * healed — and under the freeze a backfill won't heal it either (C3), which is
- * why reprice is the documented repair path. null and 0 are kept distinct:
- * "unknown rate" must not read as "free".
- */
-function valuationMoved(ev, priced) {
-  for (const f of DERIVED_FIELDS) {
-    if (f === "priced_at") continue;
-    const a = ev[f];
-    const b = priced[f];
-    if ((a == null) !== (b == null)) return true;
-    if (a == null) continue; // both null → equal
-    if (typeof a === "number" || typeof b === "number") {
-      if (Math.abs(Number(a) - Number(b)) > 1e-9) return true;
-    } else if (a !== b) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function shorten(s, w) {

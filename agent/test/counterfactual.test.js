@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Pricing } from "../src/pricing.js";
-import { compare, scenarioRows } from "../src/reprice.js";
+import { compare, scenarioRows } from "../src/counterfactual.js";
 import { table, event } from "./helpers.js";
 
 const PRICING = new Pricing(table({ "anthropic/claude-sonnet-5": { input: 2, output: 10 }, "anthropic/claude-opus-5": { input: 5, output: 25 } }), {});

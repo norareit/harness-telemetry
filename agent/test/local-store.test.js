@@ -6,7 +6,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync, unlinkSync, exis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalStore } from "../src/local-store.js";
-import { eventKey, DERIVED_FIELDS, makeEvent } from "../src/record.js";
+import { eventKey, makeEvent } from "../src/record.js";
 import { event, readOutbox } from "./helpers.js";
 
 function withStore(t) {
@@ -28,17 +28,6 @@ function archiveLines(dir) {
     .filter((f) => f.endsWith(".jsonl"))
     .flatMap((f) => readFileSync(join(evDir, f), "utf8").split("\n").filter((l) => l.trim()));
 }
-
-const inputsOf = (e) => ({
-  provider: e.provider,
-  model: e.model,
-  input_tokens: e.input_tokens,
-  output_tokens: e.output_tokens,
-  reasoning_tokens: e.reasoning_tokens,
-  cache_read_tokens: e.cache_read_tokens,
-  cache_write_5m_tokens: e.cache_write_5m_tokens,
-  cache_write_1h_tokens: e.cache_write_1h_tokens,
-});
 
 // --- record() --------------------------------------------------------------
 
@@ -90,64 +79,17 @@ test("record: a legacy hash is re-stamped without re-appending", (t) => {
   assert.ok(store.db.prepare("SELECT hash FROM archived WHERE pk=?").get(key).hash.startsWith("v2:"));
 });
 
-// --- frozenValuation() — this is what enforces plan 004 --------------------
+// --- storedEvent() — data only; the freeze policy lives in valuation.test.js --
 
-test("frozenValuation: no stored row → null", (t) => {
+test("storedEvent returns the parsed payload, or null when absent", (t) => {
   const { store } = withStore(t);
-  assert.equal(store.frozenValuation(eventKey(event()), inputsOf(event())), null);
-});
-
-test("frozenValuation: unchanged inputs return exactly the stored DERIVED_FIELDS", (t) => {
-  const { store } = withStore(t);
-  const ev = event({
-    input_tokens: 100,
-    output_tokens: 10,
-    reasoning_tokens: 5,
-    cache_read_tokens: 1000,
-    cost_usd: 1.5,
-    billing: "free",
-    priced_by: "table",
-    cache_model: "full",
-    tier_applied: null,
-    rate_input: 2,
-    rate_output: 10,
-    rate_cache_read: 0.2,
-    rate_cache_write_5m: 2.5,
-    rate_cache_write_1h: 5,
-    priced_at: "2026-09-01T10:00:05.000Z",
-  });
+  assert.equal(store.storedEvent(eventKey(event())), null);
+  const ev = event({ cost_usd: 1.5, input_tokens: 100, priced_by: "table" });
   store.record(ev);
-  const frozen = store.frozenValuation(eventKey(ev), inputsOf(ev));
-  const expected = {};
-  const made = makeEvent(ev);
-  for (const k of DERIVED_FIELDS) expected[k] = made[k];
-  assert.deepEqual(frozen, expected);
-});
-
-test("frozenValuation: a pre-freeze row keeps priced_at null through the round-trip", (t) => {
-  const { store } = withStore(t);
-  const ev = event({ cost_usd: 1, priced_by: "table", priced_at: null });
-  store.record(ev);
-  assert.equal(store.frozenValuation(eventKey(ev), inputsOf(ev)).priced_at, null);
-});
-
-test("frozenValuation: any changed pricing input invalidates the freeze", (t) => {
-  const { store } = withStore(t);
-  const ev = event({ input_tokens: 100, cost_usd: 1, priced_by: "table" });
-  store.record(ev);
-  for (const f of ["input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"]) {
-    assert.equal(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), [f]: 999 }), null, f);
-  }
-  assert.equal(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), model: "other" }), null);
-});
-
-test("frozenValuation: '' and undefined provider compare equal to stored null", (t) => {
-  const { store } = withStore(t);
-  const ev = event({ provider: null, model: null, cost_usd: 1 });
-  store.record(ev);
-  assert.ok(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), provider: "" }));
-  assert.ok(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), provider: undefined }));
-  assert.equal(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), provider: "anthropic" }), null);
+  const got = store.storedEvent(eventKey(ev));
+  assert.equal(got.cost_usd, 1.5);
+  assert.equal(got.input_tokens, 100);
+  assert.equal(got.priced_by, "table");
 });
 
 // --- scenarios -------------------------------------------------------------

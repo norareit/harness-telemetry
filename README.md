@@ -84,14 +84,20 @@ in the same order. Postgres adds one thing of its own: `synced_at`.
 ```
 cli.js ──▶ sync.js ──┬──▶ sources/claude-code.js ─┐
                      │    sources/opencode.js  ───┴──▶ raw events
-                     ├──▶ pricing.js       cost is computed HERE
-                     ├──▶ record.js        canonical shape (FIELD_ORDER)
-                     ├──▶ reprice.js       counterfactuals + `compare`
-                     ├──▶ local-store.js   JSONL archive + state.sqlite
-                     └──▶ sink-postgres.js idempotent upsert
+                     ├──▶ pricing.js        cost is computed HERE
+                     ├──▶ valuation.js      freeze/reprice policy (what a row's cost SHOULD be)
+                     ├──▶ record.js         canonical shape (FIELD_ORDER)
+                     ├──▶ counterfactual.js scenario costs + `compare`
+                     ├──▶ archive.js        the JSONL file format + hash rule
+                     ├──▶ local-store.js    state.sqlite (outbox, cursors) + owns an Archive
+                     └──▶ sink-postgres.js  idempotent upsert
 ```
 
-`config.js` feeds all of them; `doctor.js` re-reads the same modules to check them.
+`config.js` feeds all of them; `doctor.js` re-reads the same modules — importing the
+sources' own parsers rather than re-implementing them. `valuation.js` is the single place
+that decides whether a stored cost may be reused (ingest freeze) or must move (`reprice`);
+after plan 006 the word "reprice" means exactly one thing in the tree — the escape-hatch
+command — while the counterfactual code lives in `counterfactual.js`.
 
 ### Why counterfactuals are not in the JSONL
 

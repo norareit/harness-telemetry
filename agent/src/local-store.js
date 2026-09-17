@@ -153,48 +153,19 @@ export class LocalStore {
   // --- outbox --------------------------------------------------------------
 
   /**
-   * The valuation already stored for this event, or null if there is none to
-   * reuse.
-   *
-   * This is what actually ENFORCES the plans/004 freeze. Pricing happens in the
-   * extraction loop, which runs over every row a source yields — and `backfill`
-   * yields all of them. Without this lookup a backfill silently re-values the
-   * entire history at today's rates, which is exactly what the freeze exists to
-   * prevent; storing the applied rates does not help, because the upsert
-   * overwrites them alongside cost_usd. Before this existed the freeze held only
-   * as an accident of cursors being incremental.
-   *
-   * The freeze is CONDITIONAL on the pricing inputs being unchanged. OpenCode
-   * deliberately re-reads its `>=` watermark boundary so edited or streamed
-   * messages can self-correct their token counts; if that happens, the stored
-   * cost no longer follows from the stored tokens, and keeping it would make
-   * usage_cost_audit report drift forever. Changed inputs therefore re-price
-   * honestly, with a new priced_at.
-   *
-   * A pre-freeze row (priced_at NULL) is reused AS IS, null included: that null
-   * means "valued before the freeze, date unknown", and stamping it with now()
-   * would assert a valuation date that never happened.
-   *
-   * Note `billing` is frozen too, since it is part of the valuation. Changing a
-   * source's billing in config.json therefore needs an explicit `reprice`.
+   * The parsed outbox payload for this event key, or null. Data, not policy:
+   * whether that stored valuation may be REUSED at ingest is decided by
+   * valuation.js (valueAtIngest / samePricingInputs), which enforces the
+   * plans/004 freeze.
    */
-  frozenValuation(key, inputs) {
+  storedEvent(key) {
     const row = this.db.prepare("SELECT payload FROM outbox WHERE pk = ?").get(key);
     if (!row) return null;
-
-    let prev;
     try {
-      prev = JSON.parse(row.payload);
+      return JSON.parse(row.payload);
     } catch {
       return null;
     }
-    if (!samePricingInputs(prev, inputs)) return null;
-
-    // DERIVED_FIELDS is precisely the valuation: cost, billing, priced_by, the
-    // applied rate card, and priced_at.
-    const frozen = {};
-    for (const k of DERIVED_FIELDS) frozen[k] = prev[k];
-    return frozen;
   }
 
   /**
@@ -606,34 +577,6 @@ function sourceOf(ev) {
   const out = {};
   for (const k of FIELD_ORDER) if (!DERIVED_FIELDS.has(k)) out[k] = ev[k];
   return JSON.stringify(out);
-}
-
-// Everything a valuation actually depends on. Deliberately NOT the whole source
-// record: project, branch and sidechain can change without affecting cost, and
-// re-pricing on those would reopen the freeze hole from the other side.
-const PRICING_INPUT_FIELDS = [
-  "input_tokens",
-  "output_tokens",
-  "reasoning_tokens",
-  "cache_read_tokens",
-  "cache_write_5m_tokens",
-  "cache_write_1h_tokens",
-];
-
-/** Would pricing these two records produce the same answer? (See frozenValuation.) */
-function samePricingInputs(a, b) {
-  if (str(a.provider) !== str(b.provider)) return false;
-  if (str(a.model) !== str(b.model)) return false;
-  for (const k of PRICING_INPUT_FIELDS) {
-    if ((Number(a[k]) || 0) !== (Number(b[k]) || 0)) return false;
-  }
-  return true;
-}
-
-// Matches makeEvent's normalization, so a raw extractor value and a stored one
-// compare equal: both '' and undefined mean "absent", i.e. null.
-function str(v) {
-  return v ? String(v) : null;
 }
 
 function migrate(db) {

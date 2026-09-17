@@ -14,7 +14,8 @@ import { LocalStore } from "./local-store.js";
 import { PostgresSink } from "./sink-postgres.js";
 import { extractClaudeCode } from "./sources/claude-code.js";
 import { extractOpenCode } from "./sources/opencode.js";
-import { scenarioRows } from "./reprice.js";
+import { scenarioRows } from "./counterfactual.js";
+import { valueAtIngest } from "./valuation.js";
 import { eventKey } from "./record.js";
 
 const SOURCES = {
@@ -76,25 +77,14 @@ export async function runSync({ full = false, noShip = false } = {}) {
       // permanently skip events.
       await store.transactionAsync(async () => {
         for await (const raw of extract({ store, config, full })) {
-          const inputs = {
-            provider: raw.provider,
-            model: raw.model,
-            input_tokens: raw.input_tokens,
-            output_tokens: raw.output_tokens,
-            reasoning_tokens: raw.reasoning_tokens,
-            cache_read_tokens: raw.cache_read_tokens,
-            cache_write_5m_tokens: raw.cache_write_5m_tokens,
-            cache_write_1h_tokens: raw.cache_write_1h_tokens,
-          };
-
-          // plans/004: an event is valued ONCE. Re-extraction must reuse that
-          // valuation rather than restamp it at today's rates — which matters
-          // because re-extraction is routine, not exceptional: `backfill`
-          // re-yields the entire history, and OpenCode re-yields its watermark
-          // boundary row on every single run. Deliberate re-valuation is
-          // `harness-usage reprice`, never a side effect of reading.
-          const frozen = store.frozenValuation(eventKey(raw), inputs);
-          const priced = frozen || pricing.price(inputs, billing);
+          // plans/004: an event is valued ONCE. valueAtIngest reuses the stored
+          // valuation when the pricing inputs are unchanged and prices afresh
+          // otherwise — which matters because re-extraction is routine, not
+          // exceptional: `backfill` re-yields the entire history, and OpenCode
+          // re-yields its watermark boundary row on every single run.
+          // Deliberate re-valuation is `harness-usage reprice`, never a side
+          // effect of reading.
+          const { priced, frozen } = valueAtIngest({ store, pricing, raw, billing });
           if (frozen) report.frozen++;
 
           if (priced.priced_by === "none" && priced.billing !== "local") {
