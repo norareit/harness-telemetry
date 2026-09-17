@@ -1,6 +1,6 @@
 # Plan 004 — Freeze the price at ingest
 
-Status: **approved, not yet implemented.**
+Status: **implemented 2026-09-16** (commit eb7238a).
 Builds on 001 (pipeline), 002 (counterfactual repricing) and 003 (stored rates), all
 implemented. State at time of writing (2026-09-17): 4,281 events and ~30K scenario rows
 live in Postgres on `rpi5`; desktop syncs every 5 minutes via systemd.

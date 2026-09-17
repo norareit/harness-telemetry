@@ -1,6 +1,6 @@
 # Plan 003 — Store the effective rates, so costs are reproducible
 
-Status: **approved, not yet implemented.**
+Status: **implemented 2026-09-16** (commit e5827b8).
 Builds on `plans/001` (pipeline) and `plans/002` (counterfactual repricing), both implemented.
 State as of 2026-09-16: 4,177 events + 29,239 scenario rows live in Postgres on `rpi5`.
 

@@ -19,9 +19,10 @@
 //    entire reason it exists, so on an older store a backfill silently leaves
 //    the pruned events on the wrong name forever.
 //
-// A plain `sync` fixes nothing either: the reprice pass re-records stored events
-// as `{...ev, ...priced}`, and `ev` carries the device already in the payload.
-// Only the extraction path stamps `config.device`.
+// A plain `sync` fixes nothing either: the device is stamped only on the
+// extraction path (`config.device`), and an event already in the outbox is
+// re-extracted from source, not rewritten from the stored payload — so a device
+// rename never propagates to events whose source has since been pruned.
 //
 // --- What it does instead ----------------------------------------------------
 //

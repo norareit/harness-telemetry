@@ -1,6 +1,6 @@
 # Plan 005 — Unit tests for the arithmetic and the store
 
-Status: **approved, not yet implemented.**
+Status: **implemented 2026-09-18** (tests 9fb002e, C1–C4 fixes ca5ba10).
 Builds on 001 (pipeline), 002 (counterfactual repricing), 003 (stored rates) and 004 (freeze
 at ingest), all implemented. Written 2026-09-18 from a full review of the working tree at
 commit `bc923d6`.

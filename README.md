@@ -28,7 +28,8 @@ archive is written even with no network, and a backlog drains on the next run.
 | `agent/` | the per-device sync agent (Node ≥22.13, one dependency: `pg`) |
 | `agent/scripts/` | one-off repairs for already-recorded state — see its README |
 | `server/` | `docker compose` stack for the Pi: Postgres + Grafana, provisioned |
-| `plans/001-harness-usage-telemetry.md` | the design + the research it is based on |
+| `agent/test/` | `node --test` suite: `npm test` (no dependency, no network, no home access) |
+| `plans/` | the design and the research behind it — 001 (pipeline) → 006 (structure), each self-contained |
 
 ---
 
@@ -248,23 +249,37 @@ coupling to each harness that the base design avoids — not enabled by default.
 
 ### `doctor` checks
 
+`doctor` runs against *this machine's live data* — it answers "is the data sane
+right now", where `npm test` answers "is the code right" before it lands. Run
+`harness-usage doctor` for the current list; the load-bearing ones:
+
 * both source paths resolve; history size reported
-* price table loads; every provider/model pair in use resolves to a rate card
+* price table loads and is fresh; every provider/model pair in use resolves to a
+  rate card; no billable event is stored unpriced
 * **Claude Code dedupe regression** — recomputes deduped vs naive output /
   cache-creation totals and asserts the naive sum is still ≥1.5× the deduped one
   (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0). Also asserts 0 usage
   conflicts within a `requestId`.
-* **OpenCode reconciliation** — per-message token sums vs the `session` rollup
-  columns, all sessions (invariant: 82/82 at time of writing).
-* Postgres connection + `usage_event` present
+* **OpenCode reconciliation** — per-message token sums vs the `session` rollup columns
+* **cost reproducible from stored rates** — recomputes `cost_usd` from the stored
+  token counts and applied rates; drift is a corrupted write (also the permanent
+  guard against the reasoning-token regression)
+* **override drift** — each pin vs the live table, reporting pins the table can no
+  longer confirm rather than passing them silently
+* Postgres connection, `usage_event` / `usage_scenario` present, no missing columns
 
 ---
 
 ## Pricing
 
 Rates come from `~/.cache/opencode/models.json` (auto-updating, covers both
-harnesses). `agent/pricing-overrides.json` fills table misses and pins rates so
-historical rows do not silently reprice on a table update. Rules, in order:
+harnesses). `agent/pricing-overrides.json` does two jobs: it fills table misses
+(a model the table does not carry, or carries only under another provider), and
+it pins a rate you want to use in place of the table's. Note it is **not** what
+protects historical rows from a table update — the plan-004 freeze does that, by
+valuing each row once at ingest. That makes a pin pure forward policy: it applies
+to future ingests and to an explicit `reprice`, and can drift from the table
+unnoticed, which is why `doctor`'s override-drift check exists. Rules, in order:
 
 * a local provider (`ollama`, `lmstudio`, `llamacpp`, `local`) → cost `0`, `billing='local'`,
   checked *before* the table so a coincidental name match cannot attribute spend to it
@@ -445,9 +460,12 @@ Postgres is unaffected either way: `sink-postgres.js` upserts on the same key, s
 superseded lines collapse onto one row.
 
 A line is appended only when the **extracted** data is new or changed — never for a
-reprice, since costs are derived and recomputable. The consequence is that cost fields
-in an archived line are as-of-first-archival and may be stale; **Postgres is
-authoritative for cost**, the archive for token counts.
+reprice, since costs are derived and recomputable. Under the plan-004 freeze the
+archive's cost and Postgres therefore agree for every row **except one repriced
+since it was first archived**: `reprice` re-values the outbox (and Postgres) but
+appends no archive line, since the token counts did not change. So the archive is
+authoritative for token counts and **Postgres is authoritative for cost** — they
+differ only where an explicit reprice has run.
 
 `harness-usage compact-archive` rewrites the files keeping the last line per event, if
 duplicates accumulated before this rule existed.
