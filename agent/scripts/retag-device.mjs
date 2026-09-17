@@ -47,12 +47,10 @@
 // afterwards with `harness-usage show` and a GROUP BY device against Postgres.
 
 import { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { FIELD_ORDER, DERIVED_FIELDS } from "../src/record.js";
 import { DATA_DIR } from "../src/config.js";
-import { HASH_VERSION } from "../src/local-store.js";
+import { HASH_VERSION, orderFields, sourceHash } from "../src/archive.js";
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -71,21 +69,10 @@ if (!FROM || !TO) {
   process.exit(2);
 }
 
-// Mirrors local-store.js. Both derive from FIELD_ORDER / DERIVED_FIELDS, so they
-// track a schema change on their own; HASH_VERSION is imported for the same
-// reason, since a bump there must not silently produce hashes record() rejects.
-const orderFields = (ev) => {
-  const out = {};
-  for (const k of FIELD_ORDER) out[k] = ev[k];
-  return out;
-};
-const sourceOf = (ev) => {
-  const out = {};
-  for (const k of FIELD_ORDER) if (!DERIVED_FIELDS.has(k)) out[k] = ev[k];
-  return JSON.stringify(out);
-};
-const sourceHash = (ev) =>
-  HASH_VERSION + createHash("sha1").update(sourceOf(ev)).digest("hex");
+// orderFields / sourceHash / HASH_VERSION come from src/archive.js — the same
+// code record() uses, so a rewritten line and hash match exactly what the next
+// sync expects (state 'unchanged', nothing re-appended). They used to be
+// re-implemented here, which is the classic symptom of a missing module.
 
 const db = new DatabaseSync(join(DIR, "state.sqlite"));
 db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");

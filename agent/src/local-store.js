@@ -1,49 +1,27 @@
-// Local store — the on-device half of the pipeline. Two things live here:
+// Local store — the SQLite half of the pipeline: state.sqlite holds the sync
+// cursors and the outbox. Rows are inserted here (idempotently, keyed by the
+// canonical PK) at the same time they are appended to the JSONL archive, and
+// flipped to synced=1 only on a confirmed Postgres upsert. If shipping is down
+// the backlog just accumulates.
 //
-//   1. events/YYYY-MM-DD.jsonl   the readable archive, one JSON object per line,
-//      jq-friendly. Given that Claude Code prunes its own transcripts after
-//      ~30 days, this is the only durable history past that window, so it is
-//      written on every sync regardless of whether Postgres is reachable.
-//
-//   2. state.sqlite              sync cursors + the outbox. Rows are inserted
-//      here (idempotently, keyed by the canonical PK) at the same time they are
-//      appended to the JSONL, and flipped to synced=1 only on a confirmed
-//      Postgres upsert. If shipping is down the backlog just accumulates.
+// The JSONL archive itself (the readable, durable history) is owned by
+// archive.js; this store holds one Archive and the `archived` table that tracks
+// which events' source data is already on disk.
 //
 // SQLite comes from the built-in node:sqlite (Node >=22.13, where it stopped
 // needing --experimental-sqlite) — no native build.
 
 import { DatabaseSync } from "node:sqlite";
-import {
-  mkdirSync,
-  appendFileSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-  renameSync,
-} from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DATA_DIR } from "./config.js";
-import {
-  makeEvent,
-  eventKey,
-  eventDay,
-  FIELD_ORDER,
-  DERIVED_FIELDS,
-} from "./record.js";
-
-// Prefix on stored archive hashes. Bumped when the hash BASIS changes, so a
-// legacy hash can be recognised and re-stamped without re-appending the line.
-// Exported so a repair script can recompute an archive hash the same way rather
-// than hardcoding the version and silently producing hashes record() rejects.
-export const HASH_VERSION = "v2:";
+import { makeEvent, eventKey, eventDay } from "./record.js";
+import { Archive, HASH_VERSION, orderFields, sourceHash } from "./archive.js";
 
 export class LocalStore {
   constructor({ dataDir = DATA_DIR } = {}) {
     this.dataDir = dataDir;
     this.eventsDir = join(dataDir, "events");
-    mkdirSync(this.eventsDir, { recursive: true });
+    this.archive = new Archive({ eventsDir: this.eventsDir });
     this.db = new DatabaseSync(join(dataDir, "state.sqlite"));
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     migrate(this.db);
@@ -191,8 +169,7 @@ export class LocalStore {
     const ev = makeEvent(partial);
     const key = eventKey(ev);
     const payload = JSON.stringify(orderFields(ev));
-    const sourceHash =
-      HASH_VERSION + createHash("sha1").update(sourceOf(ev)).digest("hex");
+    const srcHash = sourceHash(ev);
 
     const prevOutbox = this.db
       .prepare("SELECT payload FROM outbox WHERE pk = ?")
@@ -226,19 +203,19 @@ export class LocalStore {
       // basis would duplicate every line a second time.
       shouldAppend = false;
     } else {
-      shouldAppend = prevArchived.hash !== sourceHash;
+      shouldAppend = prevArchived.hash !== srcHash;
     }
 
     if (shouldAppend) {
-      appendFileSync(join(this.eventsDir, `${eventDay(ev)}.jsonl`), payload + "\n");
+      this.archive.append(ev);
     }
-    if (!prevArchived || prevArchived.hash !== sourceHash) {
+    if (!prevArchived || prevArchived.hash !== srcHash) {
       this.db
         .prepare(
           `INSERT INTO archived (pk, hash) VALUES (?, ?)
            ON CONFLICT(pk) DO UPDATE SET hash = excluded.hash`,
         )
-        .run(key, sourceHash);
+        .run(key, srcHash);
     }
     return state;
   }
@@ -393,47 +370,9 @@ export class LocalStore {
     return stale;
   }
 
-  /**
-   * Rewrite the JSONL archive keeping only the last line per event.
-   *
-   * Needed once, to clean up duplicates written before record() split the
-   * archive hash from the ship hash. Last-wins matches how every consumer is
-   * meant to read the archive, and the duplicate lines differ only in derived
-   * pricing metadata, so nothing extracted is lost.
-   *
-   * Rewrites each day file atomically (temp file + rename).
-   */
+  /** Rewrite the JSONL archive keeping only the last line per event. */
   compactArchive() {
-    const files = readdirSync(this.eventsDir).filter((f) => f.endsWith(".jsonl"));
-    let linesBefore = 0;
-    let linesAfter = 0;
-
-    for (const f of files) {
-      const path = join(this.eventsDir, f);
-      const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
-      linesBefore += lines.length;
-
-      const lastByKey = new Map();
-      for (const line of lines) {
-        try {
-          const e = JSON.parse(line);
-          lastByKey.set(eventKey(e), line);
-        } catch {
-          // Unparseable line: keep it rather than silently discard data.
-          lastByKey.set(`__raw__${lastByKey.size}`, line);
-        }
-      }
-
-      const out = [...lastByKey.values()];
-      linesAfter += out.length;
-      if (out.length === lines.length) continue;
-
-      const tmp = `${path}.tmp`;
-      writeFileSync(tmp, out.join("\n") + "\n");
-      renameSync(tmp, path);
-    }
-
-    return { files: files.length, linesBefore, linesAfter, removed: linesBefore - linesAfter };
+    return this.archive.compact();
   }
 
   /**
@@ -456,25 +395,7 @@ export class LocalStore {
    * duplicate copy of the entire history.
    */
   importArchive() {
-    const files = readdirSync(this.eventsDir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .sort();
-
-    // Last-wins per event, matching how every other consumer reads the archive.
-    const lastByKey = new Map();
-    let unreadable = 0;
-    for (const f of files) {
-      const lines = readFileSync(join(this.eventsDir, f), "utf8").split("\n");
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const ev = makeEvent(JSON.parse(line));
-          lastByKey.set(eventKey(ev), ev);
-        } catch {
-          unreadable++;
-        }
-      }
-    }
+    const { lastByKey, unreadable, files } = this.archive.readAll();
 
     let restored = 0;
     let present = 0;
@@ -502,15 +423,12 @@ export class LocalStore {
           ev.ts,
           JSON.stringify(orderFields(ev)),
         );
-        arch.run(
-          key,
-          HASH_VERSION + createHash("sha1").update(sourceOf(ev)).digest("hex"),
-        );
+        arch.run(key, sourceHash(ev));
         restored++;
       }
     });
 
-    return { files: files.length, events: lastByKey.size, restored, present, unreadable };
+    return { files, events: lastByKey.size, restored, present, unreadable };
   }
 
   // --- reporting -----------------------------------------------------------
@@ -560,23 +478,6 @@ export class LocalStore {
       byModel,
     };
   }
-}
-
-function orderFields(ev) {
-  const out = {};
-  for (const k of FIELD_ORDER) out[k] = ev[k];
-  return out;
-}
-
-/**
- * Canonical JSON of the EXTRACTED fields only — everything the harness told us,
- * with the derived pricing fields removed. This is what decides whether a line
- * is appended to the archive.
- */
-function sourceOf(ev) {
-  const out = {};
-  for (const k of FIELD_ORDER) if (!DERIVED_FIELDS.has(k)) out[k] = ev[k];
-  return JSON.stringify(out);
 }
 
 function migrate(db) {
