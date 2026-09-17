@@ -1,14 +1,31 @@
 // sources.test.js — the extractors against synthetic fixtures (§5).
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { LocalStore } from "../src/local-store.js";
 import { extractClaudeCode } from "../src/sources/claude-code.js";
 import { extractOpenCode as _oc, reconcile as _rec } from "../src/sources/opencode.js";
+
+// Every tmp dir this file makes is tracked and removed after the run — these
+// helpers are not handed a test context, so a single top-level after() is the
+// tidy place to sweep them.
+const TMP = [];
+const mkTmp = () => {
+  const d = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  TMP.push(d);
+  return d;
+};
+after(() => {
+  for (const d of TMP) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {}
+  }
+});
 
 async function collect(gen) {
   const out = [];
@@ -19,7 +36,7 @@ async function collect(gen) {
 // --- Claude Code -----------------------------------------------------------
 
 function ccScratch() {
-  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const dir = mkTmp();
   const root = join(dir, "cc");
   mkdirSync(join(root, "proj"), { recursive: true });
   const store = new LocalStore({ dataDir: join(dir, "data") });
@@ -124,6 +141,9 @@ test("CC: a partial trailing line is held back until it completes", async () => 
   const l2 = JSON.stringify(assistant({ requestId: "r2" }));
   s.write(l1 + "\n" + l2.slice(0, 20)); // second line truncated, no newline
   assert.equal((await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }))).length, 1);
+  // The cursor stops at the end of the complete first line — the partial second
+  // line is left for next time, not consumed.
+  assert.equal(s.store.getFileCursor(s.path).offset, Buffer.byteLength(l1 + "\n"));
   s.write(l1 + "\n" + l2 + "\n"); // complete it
   assert.equal((await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }))).length, 1);
   assert.equal((await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }))).length, 0);
@@ -146,7 +166,7 @@ test("CC: a mismatched inode forces a re-read from the start", async () => {
 // --- OpenCode --------------------------------------------------------------
 
 function ocDb(rows) {
-  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const dir = mkTmp();
   const path = join(dir, "opencode.db");
   const db = new DatabaseSync(path);
   db.exec(`
@@ -182,7 +202,7 @@ const ocData = (over = {}) => ({
 });
 
 function ocStore() {
-  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const dir = mkTmp();
   return new LocalStore({ dataDir: dir });
 }
 
@@ -231,6 +251,9 @@ test("OC: the watermark re-yields only the boundary row on the next run", async 
   const cfg = { sources: { opencode: { db: path } } };
   const first = await collect(_oc({ store, config: cfg, full: false }));
   assert.equal(first.length, 2);
+  // The stored watermark is the max time_updated seen, so the next run re-reads
+  // only the boundary (>=) and nothing older.
+  assert.equal(Number(store.getKV("watermark:opencode:time_updated")), 200);
   const second = await collect(_oc({ store, config: cfg, full: false }));
   assert.deepEqual(second.map((e) => e.message_id), ["boundary"]);
 });

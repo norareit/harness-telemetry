@@ -36,6 +36,7 @@ function seeded(t, config = {}) {
   s.writeTranscript([rec("r1"), rec("r2")]);
   const first = s.run("sync", "--no-ship");
   assert.equal(first.code, 0, first.stderr);
+  s.first = first; // the seeding sync's result, for tests that assert on it
   return s;
 }
 
@@ -64,7 +65,7 @@ function nullRatesFor(dataDir, messageId) {
 
 test("1: sync prices at ingest — two events, two scenario rows, priced_at ~now", (t) => {
   const s = seeded(t);
-  const out = s.run("sync", "--no-ship");
+  assert.match(s.first.stdout, /recorded new=2/);
   const scen = readScenarios(s.dataDir);
   assert.equal(scen.length, 2);
   for (const r of scen) {
@@ -125,7 +126,7 @@ test("5: reprice --dry-run writes nothing", (t) => {
   s.writeConfig({ scenarios: [SCEN], pricing: { overrides: ov } });
   const before = readOutbox(s.dataDir);
   const r = s.run("reprice", "--dry-run");
-  assert.match(r.stdout, /would change/);
+  assert.match(r.stdout, /2 would change/);
   assert.deepEqual(readOutbox(s.dataDir), before);
 });
 

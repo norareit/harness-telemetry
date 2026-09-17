@@ -180,7 +180,12 @@ harness-usage show        # local summary: totals, per-model cost, unsynced back
 harness-usage doctor      # preflight + regression checks (see below)
 
 harness-usage sync --no-ship   # write the local archive only, skip Postgres
+
+npm test                   # the unit suite (node:test; no deps, no network, no ~ access)
 ```
+
+`npm test` checks the code before it lands; `doctor` checks this machine's live
+data. They are complements, not substitutes — keep both.
 
 ### Counterfactual repricing
 

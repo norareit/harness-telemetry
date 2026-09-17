@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalStore } from "../src/local-store.js";
@@ -16,6 +16,7 @@ function withStore(t) {
     try {
       store.close();
     } catch {}
+    rmSync(dir, { recursive: true, force: true });
   });
   return { dir, store };
 }
@@ -258,6 +259,7 @@ test("importArchive restores missing events and leaves present ones untouched", 
     try {
       store2.close();
     } catch {}
+    rmSync(dir, { recursive: true, force: true });
   });
   store2.record(event({ message_id: "k2", output_tokens: 5, cost_usd: 0.99 })); // live value, newer than archive
 
