@@ -41,6 +41,7 @@ export async function runSync({ full = false, noShip = false } = {}) {
     extracted: {},
     recorded: { new: 0, changed: 0, unchanged: 0 },
     frozen: 0, // re-extracted events whose stored valuation was reused
+    scenariosInvalidated: 0, // events whose tokens changed, dropping stale scenarios
     unpriced: new Set(),
     shipped: 0,
     unsynced: 0,
@@ -53,6 +54,11 @@ export async function runSync({ full = false, noShip = false } = {}) {
   };
 
   if (full) store.resetCursors();
+
+  // Event keys whose pricing inputs changed on this run (an OpenCode boundary
+  // row self-corrected, say). Their frozen scenario rows are now stale and must
+  // be dropped before the scenario pass regenerates them — see below (C1).
+  const invalidated = new Set();
 
   try {
     for (const [name, extract] of Object.entries(SOURCES)) {
@@ -104,6 +110,11 @@ export async function runSync({ full = false, noShip = false } = {}) {
             ...priced,
           });
           report.recorded[state]++;
+          // An EXISTING event that re-priced (frozen was null) means its pricing
+          // inputs moved. Its scenario rows are keyed off the same event and are
+          // now stale — mark for invalidation. A 'changed' with frozen set is a
+          // non-pricing field (project, branch) moving, which scenarios ignore.
+          if (state === "changed" && !frozen) invalidated.add(eventKey(raw));
           count++;
         }
       });
@@ -130,6 +141,15 @@ export async function runSync({ full = false, noShip = false } = {}) {
     // A scenario added later CANNOT be priced historically — no archive of past
     // rate tables exists — so such rows carry a priced_at far after their event's
     // ts. That is the visible marker of a non-contemporaneous comparison.
+    // Stale counterfactuals first: an event whose tokens changed keeps its
+    // scenario rows frozen otherwise (existingScenarioPairs would skip them),
+    // leaving the dashboard comparing a corrected actual against an uncorrected
+    // alternative (C1). Dropping them here lets the incremental pass below
+    // regenerate them with a fresh priced_at.
+    if (invalidated.size) {
+      report.scenariosInvalidated = store.dropScenariosFor([...invalidated]);
+    }
+
     const scenarios = config.scenarios || [];
     if (scenarios.length) {
       const pruned = store.pruneScenarios(scenarios);

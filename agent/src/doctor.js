@@ -222,7 +222,7 @@ export async function runDoctor() {
             (firstBad ? ` — e.g. ${firstBad}` : "") +
             (unrated ? `; ${unrated} have no rate card (local/unpriced — expected)` : "") +
             (total - checked - unrated > 0
-              ? `; ${total - checked - unrated} priced but missing rates — run backfill`
+              ? `; ${total - checked - unrated} priced but missing rates — run 'harness-usage reprice --model <provider/model>' (a backfill reuses the frozen nulls)`
               : ""),
       );
     } finally {
@@ -252,29 +252,21 @@ export async function runDoctor() {
   }
 
   // --- override drift ------------------------------------------------------
-  // A pinned override deliberately does not track the table — that is the point
-  // — but silent rot is not. Compare each pin against the live table where the
-  // table actually has an entry.
   {
-    const drift = [];
-    const pins = Object.entries(pricing.overrides || {});
-    for (const [key, ov] of pins) {
-      const live = pricing.tableCard(key);
-      if (!live) continue; // no table entry is usually *why* it is pinned
-      for (const f of ["input", "output", "cache_read", "cache_write"]) {
-        const pinned = ov[f];
-        const table = live.base[f];
-        if (pinned != null && table != null && Math.abs(pinned - table) > 1e-9) {
-          drift.push(`${key} ${f}: pinned ${pinned} vs table ${table}`);
-        }
-      }
-    }
+    const { pins, checked, drift, unverifiable } = overrideDrift(pricing);
+    // A pin the table cannot confirm is NOT a pass — it is exactly the one plan
+    // 004 named as apt to "silently rot" (the Vercel-sourced terra-fast rate,
+    // whose only table entry lives under a different provider). Report it rather
+    // than count it as verified (review finding C4).
+    const note = unverifiable.length
+      ? ` — ${unverifiable.length} unverifiable, no table entry to check against: ${unverifiable.join(", ")}`
+      : "";
     add(
       "override drift",
       drift.length === 0,
       drift.length
-        ? `${drift.join("; ")} — update pricing-overrides.json if the table is now right`
-        : `${pins.length} pinned override(s), none diverging from the table`,
+        ? `${drift.join("; ")} — update pricing-overrides.json if the table is now right${note}`
+        : `${checked}/${pins} pin(s) checked against the table, none diverging${note}`,
     );
   }
 
@@ -496,6 +488,34 @@ function fmtM(n) {
 // (legal, and common in generated passwords) would end the match early and
 // print the remainder of the secret verbatim. The host separator is the LAST
 // '@' in the string, so anchor on that.
+/**
+ * Compare each pinned override against the live table, and split the result:
+ * `drift` are pins whose rates now diverge from the table (fix the pin);
+ * `unverifiable` are pins the table has no entry for, so rot cannot be detected
+ * — reported, never silently skipped (review finding C4). A pin deliberately
+ * does not track the table; the point is to notice when it should.
+ */
+export function overrideDrift(pricing) {
+  const drift = [];
+  const unverifiable = [];
+  const pins = Object.entries(pricing.overrides || {});
+  for (const [key, ov] of pins) {
+    const live = pricing.tableCard(key);
+    if (!live) {
+      unverifiable.push(key);
+      continue;
+    }
+    for (const f of ["input", "output", "cache_read", "cache_write"]) {
+      const pinned = ov[f];
+      const table = live.base[f];
+      if (pinned != null && table != null && Math.abs(pinned - table) > 1e-9) {
+        drift.push(`${key} ${f}: pinned ${pinned} vs table ${table}`);
+      }
+    }
+  }
+  return { pins: pins.length, checked: pins.length - unverifiable.length, drift, unverifiable };
+}
+
 export function redactDsn(dsn) {
   const s = String(dsn);
   const schemeEnd = s.indexOf("://");

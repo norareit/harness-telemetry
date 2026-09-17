@@ -385,6 +385,30 @@ export class LocalStore {
     return r.changes;
   }
 
+  /**
+   * Drop every scenario row for the given event keys, so the next scenario pass
+   * regenerates them with a fresh (honest) priced_at.
+   *
+   * The counterpart to the plan-004 freeze for scenarios: a scenario pair is
+   * kept forever once written (existingScenarioPairs skips it), which is right
+   * until the event's own token counts change under it — OpenCode re-reads and
+   * self-corrects its watermark boundary row. When that happens sync.js has
+   * already decided the event's pricing inputs moved (frozenValuation returned
+   * null); this drops the now-stale counterfactuals keyed off the same event so
+   * they cannot compare a corrected actual against an uncorrected alternative
+   * (review finding C1). Keys are event keys (eventKey), which ARE the scenario
+   * outbox pk.
+   */
+  dropScenariosFor(keys) {
+    if (!keys.length) return 0;
+    const stmt = this.db.prepare("DELETE FROM outbox_scenario WHERE pk = ?");
+    let n = 0;
+    this.transaction(() => {
+      for (const k of keys) n += stmt.run(k).changes;
+    });
+    return n;
+  }
+
   /** Drop locally-queued rows for scenarios no longer configured. */
   pruneScenarios(keep) {
     const rows = this.db

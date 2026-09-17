@@ -16,6 +16,7 @@ import { LocalStore } from "./local-store.js";
 import { loadConfig, CONFIG_PATH } from "./config.js";
 import { loadPricing } from "./pricing.js";
 import { compare, GROUP_KEYS } from "./reprice.js";
+import { DERIVED_FIELDS } from "./record.js";
 
 const [cmd, ...args] = process.argv.slice(2);
 const opts = parseArgs(args);
@@ -151,6 +152,11 @@ async function cmdSync({ full }) {
   if (r.unpriced.length) {
     console.log(`  unpriced models: ${r.unpriced.join(", ")}`);
   }
+  if (r.scenariosInvalidated) {
+    console.log(
+      `  scenarios: ${r.scenariosInvalidated} rows dropped as stale (their event's tokens changed)`,
+    );
+  }
   if (r.scenarioRows) {
     console.log(`  scenarios: ${r.scenarioRows} rows across the configured targets`);
   }
@@ -210,10 +216,7 @@ async function cmdReprice() {
 
       const srcCfg = config.sources[ev.harness];
       const priced = pricing.price(ev, srcCfg?.billing || "free");
-      const moved =
-        Math.abs((priced.cost_usd || 0) - (ev.cost_usd || 0)) > 1e-9 ||
-        priced.priced_by !== ev.priced_by;
-      if (moved) updates.push({ ev, priced });
+      if (valuationMoved(ev, priced)) updates.push({ ev, priced });
     }
 
     const scope =
@@ -448,6 +451,33 @@ async function cmdDoctor() {
   }
   console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
   if (failed) process.exit(1);
+}
+
+/**
+ * Has the whole valuation moved, not just the headline cost?
+ *
+ * Compares every DERIVED_FIELDS value except priced_at (which is set fresh on
+ * every reprice and so always "moves"). Earlier this looked only at cost_usd
+ * and priced_by, so a billing change was never re-applied (review finding C2)
+ * and a pre-plan-003 row with null rates but an unchanged price could never be
+ * healed — and under the freeze a backfill won't heal it either (C3), which is
+ * why reprice is the documented repair path. null and 0 are kept distinct:
+ * "unknown rate" must not read as "free".
+ */
+function valuationMoved(ev, priced) {
+  for (const f of DERIVED_FIELDS) {
+    if (f === "priced_at") continue;
+    const a = ev[f];
+    const b = priced[f];
+    if ((a == null) !== (b == null)) return true;
+    if (a == null) continue; // both null → equal
+    if (typeof a === "number" || typeof b === "number") {
+      if (Math.abs(Number(a) - Number(b)) > 1e-9) return true;
+    } else if (a !== b) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function shorten(s, w) {

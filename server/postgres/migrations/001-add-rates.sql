@@ -13,9 +13,11 @@
 --   docker compose exec -T postgres psql -U harness -d harness \
 --     < server/postgres/migrations/001-add-rates.sql
 --
--- Then run `harness-usage backfill` on each device to populate the new columns
--- for existing rows. Until that runs, rate_* stays NULL on historical rows,
--- which is correct — their rates genuinely are not known.
+-- Then run `harness-usage reprice` on each device to populate the new columns
+-- for existing rows. (NOT `backfill`: under the plan-004 freeze a backfill
+-- reuses each row's stored valuation, nulls included, so it would not fill
+-- these in.) Until that runs, rate_* stays NULL on historical rows, which is
+-- correct — their rates genuinely are not known.
 
 BEGIN;
 
