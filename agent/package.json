@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node --no-warnings src/cli.js",
-    "doctor": "node --no-warnings src/cli.js doctor"
+    "doctor": "node --no-warnings src/cli.js doctor",
+    "test": "node --no-warnings --test 'test/*.test.js'"
   },
   "engines": {
     "node": ">=22.13"

@@ -496,7 +496,7 @@ function fmtM(n) {
 // (legal, and common in generated passwords) would end the match early and
 // print the remainder of the secret verbatim. The host separator is the LAST
 // '@' in the string, so anchor on that.
-function redactDsn(dsn) {
+export function redactDsn(dsn) {
   const s = String(dsn);
   const schemeEnd = s.indexOf("://");
   const at = s.lastIndexOf("@");

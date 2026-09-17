@@ -16,7 +16,7 @@ const { Pool } = pg;
 // not the PK.)
 const COLUMNS = FIELD_ORDER.slice();
 
-const UPDATE_SET = COLUMNS.filter(
+export const UPDATE_SET = COLUMNS.filter(
   (c) => !["harness", "session_id", "message_id"].includes(c),
 )
   .map((c) => `${c} = EXCLUDED.${c}`)
@@ -160,7 +160,7 @@ export class PostgresSink {
   }
 }
 
-const SCENARIO_COLUMNS = [
+export const SCENARIO_COLUMNS = [
   "harness",
   "session_id",
   "message_id",

@@ -1,0 +1,276 @@
+// local-store.test.js — the store, the freeze, scenarios, the archive (§3).
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LocalStore } from "../src/local-store.js";
+import { eventKey, DERIVED_FIELDS, makeEvent } from "../src/record.js";
+import { event, readOutbox } from "./helpers.js";
+
+function withStore(t) {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const store = new LocalStore({ dataDir: dir });
+  t.after(() => {
+    try {
+      store.close();
+    } catch {}
+  });
+  return { dir, store };
+}
+
+function archiveLines(dir) {
+  const evDir = join(dir, "events");
+  if (!existsSync(evDir)) return [];
+  return readdirSync(evDir)
+    .filter((f) => f.endsWith(".jsonl"))
+    .flatMap((f) => readFileSync(join(evDir, f), "utf8").split("\n").filter((l) => l.trim()));
+}
+
+const inputsOf = (e) => ({
+  provider: e.provider,
+  model: e.model,
+  input_tokens: e.input_tokens,
+  output_tokens: e.output_tokens,
+  reasoning_tokens: e.reasoning_tokens,
+  cache_read_tokens: e.cache_read_tokens,
+  cache_write_5m_tokens: e.cache_write_5m_tokens,
+  cache_write_1h_tokens: e.cache_write_1h_tokens,
+});
+
+// --- record() --------------------------------------------------------------
+
+test("record: first call is 'new', one archive line, one v2 hash", (t) => {
+  const { dir, store } = withStore(t);
+  const st = store.record(event({ output_tokens: 5 }));
+  assert.equal(st, "new");
+  assert.equal(archiveLines(dir).length, 1);
+  const { hash } = store.db.prepare("SELECT hash FROM archived WHERE pk=?").get(eventKey(event()));
+  assert.ok(hash.startsWith("v2:"));
+});
+
+test("record: identical payload is 'unchanged' and leaves synced alone", (t) => {
+  const { dir, store } = withStore(t);
+  store.record(event({ output_tokens: 5 }));
+  store.db.prepare("UPDATE outbox SET synced=1 WHERE pk=?").run(eventKey(event()));
+  const st = store.record(event({ output_tokens: 5 }));
+  assert.equal(st, "unchanged");
+  assert.equal(archiveLines(dir).length, 1);
+  assert.equal(store.db.prepare("SELECT synced FROM outbox WHERE pk=?").get(eventKey(event())).synced, 1);
+});
+
+test("record: a derived-only change re-ships but appends no archive line", (t) => {
+  const { dir, store } = withStore(t);
+  store.record(event({ output_tokens: 5, cost_usd: 0.1 }));
+  store.db.prepare("UPDATE outbox SET synced=1 WHERE pk=?").run(eventKey(event()));
+  const st = store.record(event({ output_tokens: 5, cost_usd: 0.2 }));
+  assert.equal(st, "changed");
+  assert.equal(store.db.prepare("SELECT synced FROM outbox WHERE pk=?").get(eventKey(event())).synced, 0);
+  assert.equal(archiveLines(dir).length, 1);
+});
+
+test("record: a source change appends a new archive line", (t) => {
+  const { dir, store } = withStore(t);
+  store.record(event({ output_tokens: 5 }));
+  const st = store.record(event({ output_tokens: 6 }));
+  assert.equal(st, "changed");
+  assert.equal(archiveLines(dir).length, 2);
+});
+
+test("record: a legacy hash is re-stamped without re-appending", (t) => {
+  const { dir, store } = withStore(t);
+  const key = eventKey(event());
+  store.record(event({ output_tokens: 5 }));
+  store.db.prepare("UPDATE archived SET hash=? WHERE pk=?").run("legacy-no-prefix", key);
+  const before = archiveLines(dir).length;
+  store.record(event({ output_tokens: 5 }));
+  assert.equal(archiveLines(dir).length, before);
+  assert.ok(store.db.prepare("SELECT hash FROM archived WHERE pk=?").get(key).hash.startsWith("v2:"));
+});
+
+// --- frozenValuation() — this is what enforces plan 004 --------------------
+
+test("frozenValuation: no stored row → null", (t) => {
+  const { store } = withStore(t);
+  assert.equal(store.frozenValuation(eventKey(event()), inputsOf(event())), null);
+});
+
+test("frozenValuation: unchanged inputs return exactly the stored DERIVED_FIELDS", (t) => {
+  const { store } = withStore(t);
+  const ev = event({
+    input_tokens: 100,
+    output_tokens: 10,
+    reasoning_tokens: 5,
+    cache_read_tokens: 1000,
+    cost_usd: 1.5,
+    billing: "free",
+    priced_by: "table",
+    cache_model: "full",
+    tier_applied: null,
+    rate_input: 2,
+    rate_output: 10,
+    rate_cache_read: 0.2,
+    rate_cache_write_5m: 2.5,
+    rate_cache_write_1h: 5,
+    priced_at: "2026-09-01T10:00:05.000Z",
+  });
+  store.record(ev);
+  const frozen = store.frozenValuation(eventKey(ev), inputsOf(ev));
+  const expected = {};
+  const made = makeEvent(ev);
+  for (const k of DERIVED_FIELDS) expected[k] = made[k];
+  assert.deepEqual(frozen, expected);
+});
+
+test("frozenValuation: a pre-freeze row keeps priced_at null through the round-trip", (t) => {
+  const { store } = withStore(t);
+  const ev = event({ cost_usd: 1, priced_by: "table", priced_at: null });
+  store.record(ev);
+  assert.equal(store.frozenValuation(eventKey(ev), inputsOf(ev)).priced_at, null);
+});
+
+test("frozenValuation: any changed pricing input invalidates the freeze", (t) => {
+  const { store } = withStore(t);
+  const ev = event({ input_tokens: 100, cost_usd: 1, priced_by: "table" });
+  store.record(ev);
+  for (const f of ["input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"]) {
+    assert.equal(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), [f]: 999 }), null, f);
+  }
+  assert.equal(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), model: "other" }), null);
+});
+
+test("frozenValuation: '' and undefined provider compare equal to stored null", (t) => {
+  const { store } = withStore(t);
+  const ev = event({ provider: null, model: null, cost_usd: 1 });
+  store.record(ev);
+  assert.ok(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), provider: "" }));
+  assert.ok(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), provider: undefined }));
+  assert.equal(store.frozenValuation(eventKey(ev), { ...inputsOf(ev), provider: "anthropic" }), null);
+});
+
+// --- scenarios -------------------------------------------------------------
+
+const scenarioRow = (over = {}) => ({
+  harness: "claude-code",
+  session_id: "s1",
+  message_id: "m1",
+  scenario: "openrouter/x",
+  cost_usd: 1,
+  cache_model: "full",
+  priced_by: "table",
+  tier_applied: null,
+  rate_input: 2,
+  rate_output: 10,
+  rate_cache_read: 0.2,
+  rate_cache_write_5m: 2.5,
+  rate_cache_write_1h: 5,
+  priced_at: "2026-09-01T10:00:05.000Z",
+  ...over,
+});
+
+test("existingScenarioPairs: true for a stored pair, false for a new scenario", (t) => {
+  const { store } = withStore(t);
+  store.recordScenarios([scenarioRow()]);
+  const pred = store.existingScenarioPairs();
+  assert.ok(pred(event(), "openrouter/x"));
+  assert.ok(!pred(event(), "openrouter/y"));
+});
+
+test("recordScenarios: identical payload keeps synced, a changed cost resets it", (t) => {
+  const { store } = withStore(t);
+  const pk = eventKey(event());
+  store.recordScenarios([scenarioRow()]);
+  store.db.prepare("UPDATE outbox_scenario SET synced=1").run();
+  store.recordScenarios([scenarioRow()]);
+  assert.equal(store.db.prepare("SELECT synced FROM outbox_scenario WHERE pk=? AND scenario=?").get(pk, "openrouter/x").synced, 1);
+  store.recordScenarios([scenarioRow({ cost_usd: 2 })]);
+  assert.equal(store.db.prepare("SELECT synced FROM outbox_scenario WHERE pk=? AND scenario=?").get(pk, "openrouter/x").synced, 0);
+});
+
+test("dropScenario removes only that scenario and returns the count", (t) => {
+  const { store } = withStore(t);
+  store.recordScenarios([scenarioRow({ scenario: "a" }), scenarioRow({ scenario: "b" })]);
+  assert.equal(store.dropScenario("a"), 1);
+  const left = store.db.prepare("SELECT DISTINCT scenario FROM outbox_scenario").all().map((r) => r.scenario);
+  assert.deepEqual(left, ["b"]);
+});
+
+test("pruneScenarios removes de-configured scenarios and returns their names", (t) => {
+  const { store } = withStore(t);
+  store.recordScenarios([scenarioRow({ scenario: "a" }), scenarioRow({ scenario: "b" })]);
+  assert.deepEqual(store.pruneScenarios(["a"]).sort(), ["b"]);
+  const left = store.db.prepare("SELECT DISTINCT scenario FROM outbox_scenario").all().map((r) => r.scenario);
+  assert.deepEqual(left, ["a"]);
+});
+
+// --- outbox ----------------------------------------------------------------
+
+test("unsynced is ordered by ts; markSynced empties it", (t) => {
+  const { store } = withStore(t);
+  store.record(event({ message_id: "a", ts: "2026-09-01T10:00:02Z" }));
+  store.record(event({ message_id: "b", ts: "2026-09-01T10:00:01Z" }));
+  const u = store.unsynced();
+  assert.deepEqual(u.map((x) => x.event.message_id), ["b", "a"]);
+  store.markSynced(u.map((x) => x.pk));
+  assert.equal(store.unsynced().length, 0);
+});
+
+test("transaction() rolls back on throw", (t) => {
+  const { store } = withStore(t);
+  assert.throws(() =>
+    store.transaction(() => {
+      store.record(event({ message_id: "x" }));
+      throw new Error("boom");
+    }),
+  );
+  assert.equal(store.unsynced().length, 0);
+});
+
+// --- archive round-trip ----------------------------------------------------
+
+test("compactArchive keeps the last line per key and retains unparseable lines", (t) => {
+  const { dir, store } = withStore(t);
+  const line = (over) => JSON.stringify(makeEvent(event({ message_id: "k1", ...over })));
+  const p = join(dir, "events", "2026-09-01.jsonl");
+  writeFileSync(p, [line({ cost_usd: 0.1 }), line({ cost_usd: 0.2 }), "not-json{"].join("\n") + "\n");
+  const r = store.compactArchive();
+  assert.equal(r.linesAfter, 2);
+  assert.equal(r.removed, 1);
+  const kept = archiveLines(dir);
+  assert.ok(kept.some((l) => l.includes("not-json{")));
+  const parsed = kept.filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+  assert.equal(parsed.find((e) => e.message_id === "k1").cost_usd, 0.2);
+});
+
+test("importArchive restores missing events and leaves present ones untouched", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const store = new LocalStore({ dataDir: dir });
+  store.record(event({ message_id: "k1", output_tokens: 10, cost_usd: 0.1 }));
+  store.record(event({ message_id: "k1", output_tokens: 20, cost_usd: 0.2 })); // source change → 2 lines
+  store.record(event({ message_id: "k2", output_tokens: 5, cost_usd: 0.05 }));
+  store.close();
+
+  for (const f of readdirSync(dir)) if (f.startsWith("state.sqlite")) unlinkSync(join(dir, f));
+
+  const store2 = new LocalStore({ dataDir: dir });
+  t.after(() => {
+    try {
+      store2.close();
+    } catch {}
+  });
+  store2.record(event({ message_id: "k2", output_tokens: 5, cost_usd: 0.99 })); // live value, newer than archive
+
+  const r = store2.importArchive();
+  assert.equal(r.restored, 1);
+  assert.equal(r.present, 1);
+
+  const outbox = readOutbox(dir);
+  assert.equal(outbox.find((e) => e.message_id === "k2").cost_usd, 0.99);
+  assert.equal(outbox.find((e) => e.message_id === "k1").output_tokens, 20);
+
+  const before = archiveLines(dir).length;
+  const st = store2.record(event({ message_id: "k1", output_tokens: 20, cost_usd: 0.2 }));
+  assert.equal(st, "unchanged");
+  assert.equal(archiveLines(dir).length, before);
+});
