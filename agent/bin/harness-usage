@@ -68,9 +68,21 @@ consider "$(command -v node 2>/dev/null || true)"
 if [ -z "$NODE_BIN" ]; then
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # Source nvm in a SUBSHELL with set -eu relaxed, and let only the resolved
+    # node path escape. The shipped nvm.sh is bash-oriented and old; under our
+    # `set -eu` it trips `set -u` on an unbound variable mid-source and aborts
+    # the WHOLE wrapper — before the ~/.nvm glob below ever runs — and the
+    # `|| true` cannot catch a set -u fatal during sourcing. That is not
+    # hypothetical: it silently stopped the systemd timer for ~13h when the
+    # service's PATH carried no node, so step 1 missed and the wrapper reached
+    # here and died sourcing nvm.sh, launching nothing. The subshell isolates
+    # any such abort.
     # shellcheck disable=SC1091
-    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
-    consider "$(command -v node 2>/dev/null || true)"
+    # The trailing `|| true` matters twice over: it keeps the subshell's exit
+    # status 0 so that, under the parent's `set -e`, this assignment does not
+    # itself abort the wrapper when nvm yields no node (command -v exits 1).
+    nvm_node=$(set +eu; . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; command -v node 2>/dev/null || true)
+    consider "${nvm_node:-}"
   fi
 fi
 
