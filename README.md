@@ -112,15 +112,23 @@ harness-usage show          # the readable summary
 jq -s 'group_by(.harness + .session_id + .message_id) | map(last)
        | map(.cost_usd) | add' ~/.local/share/harness-usage/events/*.jsonl
 
-# state.sqlite — no sqlite3 binary needed, node:sqlite is built in
-node --no-warnings -e '
-const {DatabaseSync}=require("node:sqlite");
-const db=new DatabaseSync(process.env.HOME+"/.local/share/harness-usage/state.sqlite",{readOnly:true});
-console.table(db.prepare(`SELECT json_extract(payload,"$.model") model,
-                                 COUNT(*) n,
-                                 ROUND(SUM(json_extract(payload,"$.cost_usd")),4) cost
-                          FROM outbox GROUP BY 1 ORDER BY cost DESC`).all());
-db.close();'
+# state.sqlite — no sqlite3 binary needed, node:sqlite is built in.
+# A quoted heredoc, not -e '...': the SQL needs single quotes around '$.model'
+# (SQLite reads double quotes as an identifier), which would close an outer -e '...'.
+node --no-warnings - <<'EOF'
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(
+  process.env.HOME + "/.local/share/harness-usage/state.sqlite",
+  { readOnly: true },
+);
+console.table(
+  db.prepare(`SELECT json_extract(payload, '$.model')                     AS model,
+                     COUNT(*)                                             AS n,
+                     ROUND(SUM(json_extract(payload, '$.cost_usd')), 4)   AS cost
+              FROM outbox GROUP BY 1 ORDER BY cost DESC`).all(),
+);
+db.close();
+EOF
 ```
 
 Always open it `{readOnly: true}` — the timer may be mid-sync, and SQLite readers never
