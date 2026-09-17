@@ -32,6 +32,110 @@ archive is written even with no network, and a backlog drains on the next run.
 
 ---
 
+## How it works
+
+The agent is a **normalizer**. Each harness records usage in its own shape; `harness-usage`
+converts both into one canonical row, prices it, and stores it in three places: a JSONL
+archive, a local SQLite outbox, and Postgres.
+
+### Raw → canonical: three transformations
+
+Most fields are a straight rename (`cwd` → `project`, `gitBranch` → `git_branch`,
+`requestId` → `message_id`). Only three things actually change:
+
+1. **Reasoning is split out of output.** Claude Code reports `output_tokens: 1514` with
+   `thinking_tokens: 292`; the canonical row stores `output_tokens: 1222` +
+   `reasoning_tokens: 292`. Same total — separated because OpenCode reports reasoning as a
+   *separate* counter while Anthropic folds it in. Normalizing here means one costing rule
+   works for both, and the cost is unchanged (both are billed at the output rate).
+2. **Cache-creation is split by TTL.** `cache_creation_input_tokens` becomes
+   `cache_write_5m_tokens` / `cache_write_1h_tokens`, because Anthropic's 1-hour writes
+   cost `2 × input` while the table only carries the 5-minute rate.
+3. **Deduplication.** Claude Code writes one JSONL line *per content block*, each repeating
+   identical usage. The agent keeps one row per `requestId`. Without this, totals overcount
+   by roughly 2.3×.
+
+### Where cost is computed
+
+**`pricing.js`, in `computeCost()` — the only place, ever.** No SQL computes cost; Postgres
+only sums a finished `cost_usd`. A worked example, `claude-fable-5-1`:
+
+```
+    32 × $10      input                        =      320
+  1514 × $50      output + reasoning           =   75,700
+104645 × $0.25    cache read                   =   26,161.25
+   727 × $20      cache write 1h (= 2 × input) =   14,540
+                                                 ─────────
+                                         ÷ 1e6 =  $0.116721
+```
+
+The `rate_*` columns store exactly those multipliers, so any row can be re-derived from
+itself — that is what `usage_cost_audit` checks.
+
+### Is the JSONL line the Postgres row?
+
+Yes. `record()` builds one JSON string and writes it to *both* the archive and the outbox;
+shipping parses that same string, and `COLUMNS = FIELD_ORDER`, so every field is a column
+in the same order. Postgres adds one thing of its own: `synced_at`.
+
+### How the modules relate
+
+```
+cli.js ──▶ sync.js ──┬──▶ sources/claude-code.js ─┐
+                     │    sources/opencode.js  ───┴──▶ raw events
+                     ├──▶ pricing.js       cost is computed HERE
+                     ├──▶ record.js        canonical shape (FIELD_ORDER)
+                     ├──▶ reprice.js       counterfactuals + `compare`
+                     ├──▶ local-store.js   JSONL archive + state.sqlite
+                     └──▶ sink-postgres.js idempotent upsert
+```
+
+`config.js` feeds all of them; `doctor.js` re-reads the same modules to check them.
+
+### Why counterfactuals are not in the JSONL
+
+Because they are **derived, not observed**. The archive exists for one job: preserving
+token counts past Claude Code's ~30-day prune. Token counts are facts from the harness;
+scenario costs are recomputable from those facts plus a price table. Archiving them would
+add bulk and, worse, churn — every price change would append a duplicate line per event.
+
+Scenario rows live in `outbox_scenario` (state.sqlite) and ship to `usage_scenario` in
+Postgres, joined back on `(harness, session_id, message_id)`. One event therefore has one
+archive line and *N* scenario rows — same tokens, N different rate cards.
+
+### Inspecting the local store
+
+```sh
+harness-usage show          # the readable summary
+
+# raw archive — one JSON object per line, but read it LAST-WINS per event
+jq -s 'group_by(.harness + .session_id + .message_id) | map(last)
+       | map(.cost_usd) | add' ~/.local/share/harness-usage/events/*.jsonl
+
+# state.sqlite — no sqlite3 binary needed, node:sqlite is built in
+node --no-warnings -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.env.HOME+"/.local/share/harness-usage/state.sqlite",{readOnly:true});
+console.table(db.prepare(`SELECT json_extract(payload,"$.model") model,
+                                 COUNT(*) n,
+                                 ROUND(SUM(json_extract(payload,"$.cost_usd")),4) cost
+                          FROM outbox GROUP BY 1 ORDER BY cost DESC`).all());
+db.close();'
+```
+
+Always open it `{readOnly: true}` — the timer may be mid-sync, and SQLite readers never
+block the writer.
+
+| table | what |
+|---|---|
+| `outbox` | one row per event, `payload` = the canonical JSON, `synced` = shipped yet |
+| `outbox_scenario` | one row per (event, scenario) counterfactual |
+| `cc_cursor` | per-transcript `(inode, byte offset)` resume points |
+| `kv` | the OpenCode `time_updated` watermark |
+| `archived` | hash per event deciding whether a JSONL line needs appending |
+
+---
+
 ## Agent
 
 ### Install on a device
