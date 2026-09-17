@@ -153,6 +153,51 @@ export class LocalStore {
   // --- outbox --------------------------------------------------------------
 
   /**
+   * The valuation already stored for this event, or null if there is none to
+   * reuse.
+   *
+   * This is what actually ENFORCES the plans/004 freeze. Pricing happens in the
+   * extraction loop, which runs over every row a source yields — and `backfill`
+   * yields all of them. Without this lookup a backfill silently re-values the
+   * entire history at today's rates, which is exactly what the freeze exists to
+   * prevent; storing the applied rates does not help, because the upsert
+   * overwrites them alongside cost_usd. Before this existed the freeze held only
+   * as an accident of cursors being incremental.
+   *
+   * The freeze is CONDITIONAL on the pricing inputs being unchanged. OpenCode
+   * deliberately re-reads its `>=` watermark boundary so edited or streamed
+   * messages can self-correct their token counts; if that happens, the stored
+   * cost no longer follows from the stored tokens, and keeping it would make
+   * usage_cost_audit report drift forever. Changed inputs therefore re-price
+   * honestly, with a new priced_at.
+   *
+   * A pre-freeze row (priced_at NULL) is reused AS IS, null included: that null
+   * means "valued before the freeze, date unknown", and stamping it with now()
+   * would assert a valuation date that never happened.
+   *
+   * Note `billing` is frozen too, since it is part of the valuation. Changing a
+   * source's billing in config.json therefore needs an explicit `reprice`.
+   */
+  frozenValuation(key, inputs) {
+    const row = this.db.prepare("SELECT payload FROM outbox WHERE pk = ?").get(key);
+    if (!row) return null;
+
+    let prev;
+    try {
+      prev = JSON.parse(row.payload);
+    } catch {
+      return null;
+    }
+    if (!samePricingInputs(prev, inputs)) return null;
+
+    // DERIVED_FIELDS is precisely the valuation: cost, billing, priced_by, the
+    // applied rate card, and priced_at.
+    const frozen = {};
+    for (const k of DERIVED_FIELDS) frozen[k] = prev[k];
+    return frozen;
+  }
+
+  /**
    * Record one event: upsert into the outbox and, when the SOURCE data is new
    * or changed, append to the day's JSONL archive. Returns 'new', 'changed' or
    * 'unchanged', describing the shipped payload.
@@ -396,6 +441,83 @@ export class LocalStore {
     return { files: files.length, linesBefore, linesAfter, removed: linesBefore - linesAfter };
   }
 
+  /**
+   * Reload the JSONL archive into the outbox — the recovery path for a lost or
+   * corrupted state.sqlite.
+   *
+   * `backfill` cannot do this: it resets cursors and re-reads the HARNESSES,
+   * which no longer hold anything past their own retention (Claude Code prunes
+   * transcripts after ~30 days). The archive is the only durable record beyond
+   * that window, and until this existed nothing could read it back in — while
+   * the README promised precisely this recovery.
+   *
+   * Existing outbox rows are NEVER overwritten. Live state is newer than the
+   * archive by construction: archived lines carry pricing as of FIRST archival
+   * and are not re-appended when only derived fields change (see record()), so
+   * an archived cost may be stale where the outbox one is current.
+   *
+   * The `archived` hash is stamped alongside each restored row, so the next
+   * sync recognises those lines as already on disk instead of appending a
+   * duplicate copy of the entire history.
+   */
+  importArchive() {
+    const files = readdirSync(this.eventsDir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .sort();
+
+    // Last-wins per event, matching how every other consumer reads the archive.
+    const lastByKey = new Map();
+    let unreadable = 0;
+    for (const f of files) {
+      const lines = readFileSync(join(this.eventsDir, f), "utf8").split("\n");
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const ev = makeEvent(JSON.parse(line));
+          lastByKey.set(eventKey(ev), ev);
+        } catch {
+          unreadable++;
+        }
+      }
+    }
+
+    let restored = 0;
+    let present = 0;
+    this.transaction(() => {
+      const has = this.db.prepare("SELECT 1 AS x FROM outbox WHERE pk = ?");
+      const ins = this.db.prepare(
+        `INSERT INTO outbox (pk, harness, device, day, ts, payload, synced, first_seen)
+         VALUES (?, ?, ?, ?, ?, ?, 0, strftime('%s','now'))
+         ON CONFLICT(pk) DO NOTHING`,
+      );
+      const arch = this.db.prepare(
+        `INSERT INTO archived (pk, hash) VALUES (?, ?)
+         ON CONFLICT(pk) DO UPDATE SET hash = excluded.hash`,
+      );
+      for (const [key, ev] of lastByKey) {
+        if (has.get(key)) {
+          present++;
+          continue;
+        }
+        ins.run(
+          key,
+          ev.harness,
+          ev.device,
+          eventDay(ev),
+          ev.ts,
+          JSON.stringify(orderFields(ev)),
+        );
+        arch.run(
+          key,
+          HASH_VERSION + createHash("sha1").update(sourceOf(ev)).digest("hex"),
+        );
+        restored++;
+      }
+    });
+
+    return { files: files.length, events: lastByKey.size, restored, present, unreadable };
+  }
+
   // --- reporting -----------------------------------------------------------
 
   summary() {
@@ -460,6 +582,34 @@ function sourceOf(ev) {
   const out = {};
   for (const k of FIELD_ORDER) if (!DERIVED_FIELDS.has(k)) out[k] = ev[k];
   return JSON.stringify(out);
+}
+
+// Everything a valuation actually depends on. Deliberately NOT the whole source
+// record: project, branch and sidechain can change without affecting cost, and
+// re-pricing on those would reopen the freeze hole from the other side.
+const PRICING_INPUT_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "reasoning_tokens",
+  "cache_read_tokens",
+  "cache_write_5m_tokens",
+  "cache_write_1h_tokens",
+];
+
+/** Would pricing these two records produce the same answer? (See frozenValuation.) */
+function samePricingInputs(a, b) {
+  if (str(a.provider) !== str(b.provider)) return false;
+  if (str(a.model) !== str(b.model)) return false;
+  for (const k of PRICING_INPUT_FIELDS) {
+    if ((Number(a[k]) || 0) !== (Number(b[k]) || 0)) return false;
+  }
+  return true;
+}
+
+// Matches makeEvent's normalization, so a raw extractor value and a stored one
+// compare equal: both '' and undefined mean "absent", i.e. null.
+function str(v) {
+  return v ? String(v) : null;
 }
 
 function migrate(db) {

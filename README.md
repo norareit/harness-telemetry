@@ -275,13 +275,18 @@ historical rows do not silently reprice on a table update. Rules, in order:
   tier rates apply to the whole request
 * `cost = (input·in + billable_output·out + cache_read·cr + cw5m·cw + cw1h·cw1h) / 1e6`
 
-**Reasoning tokens.** For Anthropic they are already inside `output_tokens` and
-billed at the output rate — `output_tokens` is billed as-is. For OpenCode / OpenAI
-`reasoning` is a **separate** counter (verified against the live DB: `total ==
-input + output + reasoning + cache_read`), billed at the output rate — so
-`billable_output = output_tokens + reasoning_tokens`. The switch is on
-`provider === 'anthropic'`. At extraction, `output_tokens` is normalized to
-*exclude* reasoning for every harness; `reasoning_tokens` is stored alongside.
+**Reasoning tokens.** At extraction, `output_tokens` is normalized to *exclude*
+reasoning for **every** harness — Claude Code subtracts `thinking_tokens`, and
+OpenCode/OpenAI already report `reasoning` as a separate counter (verified against
+the live DB: `total == input + output + reasoning + cache_read`). `reasoning_tokens`
+is stored alongside and billed at the output rate, so billable output is uniformly
+`output_tokens + reasoning_tokens`, with **no per-provider special case**.
+
+An earlier version kept a `provider === 'anthropic'` branch here, left over from
+before that normalization existed. The two were individually correct and jointly
+wrong: Anthropic thinking tokens were billed at $0, understating the history by
+$25.41. `usage_cost_audit` now recomputes with `(output_tokens + reasoning_tokens)`
+in SQL, so the regression cannot come back unnoticed.
 
 `billing` is `free` (subscription — Stef's Max / OpenCode auth), `api` (paid per
 token), or `local` (`ollama`/`lmstudio` and friends, genuinely $0). Set per source in
@@ -409,8 +414,18 @@ outbox. Claude Code prunes its own transcripts after ~30 days, so the JSONL arch
 is the only durable history past that window — which is why extraction runs and
 archives regardless of whether the Pi is reachable.
 
-If `state.sqlite` is ever lost, `harness-usage backfill` rebuilds from the
-harnesses' own files (within their retention) plus the JSONL archive (beyond it).
+If `state.sqlite` is ever lost, recovery is two steps, in this order:
+
+```sh
+harness-usage restore-archive   # JSONL archive -> outbox (all durable history)
+harness-usage sync              # ship it, then pick up anything newer
+```
+
+`restore-archive` reads the archive last-wins per event and inserts only what the
+outbox is missing, so it never overwrites live state with an archived line whose
+cost fields are as-of-first-archival. **`backfill` alone is not enough** — it only
+re-reads the harnesses' own files, and Claude Code has pruned anything past ~30
+days.
 
 ### Reading the archive correctly
 

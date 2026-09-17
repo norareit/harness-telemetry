@@ -15,6 +15,7 @@ import { PostgresSink } from "./sink-postgres.js";
 import { extractClaudeCode } from "./sources/claude-code.js";
 import { extractOpenCode } from "./sources/opencode.js";
 import { scenarioRows } from "./reprice.js";
+import { eventKey } from "./record.js";
 
 const SOURCES = {
   "claude-code": extractClaudeCode,
@@ -39,6 +40,7 @@ export async function runSync({ full = false, noShip = false } = {}) {
     full,
     extracted: {},
     recorded: { new: 0, changed: 0, unchanged: 0 },
+    frozen: 0, // re-extracted events whose stored valuation was reused
     unpriced: new Set(),
     shipped: 0,
     unsynced: 0,
@@ -68,19 +70,27 @@ export async function runSync({ full = false, noShip = false } = {}) {
       // permanently skip events.
       await store.transactionAsync(async () => {
         for await (const raw of extract({ store, config, full })) {
-          const priced = pricing.price(
-            {
-              provider: raw.provider,
-              model: raw.model,
-              input_tokens: raw.input_tokens,
-              output_tokens: raw.output_tokens,
-              reasoning_tokens: raw.reasoning_tokens,
-              cache_read_tokens: raw.cache_read_tokens,
-              cache_write_5m_tokens: raw.cache_write_5m_tokens,
-              cache_write_1h_tokens: raw.cache_write_1h_tokens,
-            },
-            billing,
-          );
+          const inputs = {
+            provider: raw.provider,
+            model: raw.model,
+            input_tokens: raw.input_tokens,
+            output_tokens: raw.output_tokens,
+            reasoning_tokens: raw.reasoning_tokens,
+            cache_read_tokens: raw.cache_read_tokens,
+            cache_write_5m_tokens: raw.cache_write_5m_tokens,
+            cache_write_1h_tokens: raw.cache_write_1h_tokens,
+          };
+
+          // plans/004: an event is valued ONCE. Re-extraction must reuse that
+          // valuation rather than restamp it at today's rates — which matters
+          // because re-extraction is routine, not exceptional: `backfill`
+          // re-yields the entire history, and OpenCode re-yields its watermark
+          // boundary row on every single run. Deliberate re-valuation is
+          // `harness-usage reprice`, never a side effect of reading.
+          const frozen = store.frozenValuation(eventKey(raw), inputs);
+          const priced = frozen || pricing.price(inputs, billing);
+          if (frozen) report.frozen++;
+
           if (priced.priced_by === "none" && priced.billing !== "local") {
             report.unpriced.add(`${raw.provider}/${raw.model}`);
           }

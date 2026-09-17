@@ -174,6 +174,12 @@ const SCENARIO_COLUMNS = [
   "rate_cache_read",
   "rate_cache_write_5m",
   "rate_cache_write_1h",
+  // scenarioRows() has always produced this, but it was missing here, so every
+  // shipped scenario row landed with priced_at NULL — and schemaGaps() derives
+  // its expectations from this same list, so nothing could detect the gap. It
+  // is the plans/004 marker for a counterfactual priced at rates from long
+  // after its event's ts, which is the only honest reading of those rows.
+  "priced_at",
 ];
 
 const SCENARIO_UPDATE_SET = SCENARIO_COLUMNS.filter(

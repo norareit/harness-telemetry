@@ -37,6 +37,9 @@ try {
     case "compact-archive":
       await cmdCompactArchive();
       break;
+    case "restore-archive":
+      await cmdRestoreArchive();
+      break;
     case "reprice":
       await cmdReprice();
       break;
@@ -58,6 +61,15 @@ try {
   process.exit(1);
 }
 
+/**
+ * Strict by design: an unrecognised flag is an ERROR, never something to skip.
+ *
+ * `reprice` rewrites the stored ledger, so silently ignoring a mistyped
+ * `--dryrun` turned a rehearsal into a real, unfiltered re-valuation — the one
+ * command where a typo costs the most. Missing values are rejected for the same
+ * reason: `--model --dry-run` used to swallow the next flag as the model name
+ * and then reprice nothing at all, reporting success.
+ */
 function parseArgs(argv) {
   const o = {
     as: [],
@@ -70,16 +82,22 @@ function parseArgs(argv) {
     scenario: null,
     dryRun: false,
   };
-  for (let i = 0; i < argv.length; i++) {
+  let i = 0;
+  const value = (flag) => {
+    const v = argv[++i];
+    if (v === undefined || v.startsWith("-")) bail(`${flag} needs a value`);
+    return v;
+  };
+  for (; i < argv.length; i++) {
     switch (argv[i]) {
       case "--as":
-        o.as.push(argv[++i]);
+        o.as.push(value("--as"));
         break;
       case "--group":
-        o.group = argv[++i];
+        o.group = value("--group");
         break;
       case "--since":
-        o.since = argv[++i];
+        o.since = value("--since");
         break;
       case "--only-local":
         o.onlyLocal = true;
@@ -91,17 +109,25 @@ function parseArgs(argv) {
         o.unpricedOnly = true;
         break;
       case "--model":
-        o.model = argv[++i];
+        o.model = value("--model");
         break;
       case "--scenario":
-        o.scenario = argv[++i];
+        o.scenario = value("--scenario");
         break;
       case "--dry-run":
         o.dryRun = true;
         break;
+      default:
+        bail(`unknown option ${argv[i]}`);
     }
   }
   return o;
+}
+
+function bail(msg) {
+  console.error(`harness-usage: ${msg}\n`);
+  usage();
+  process.exit(2);
 }
 
 async function cmdSync({ full }) {
@@ -114,6 +140,14 @@ async function cmdSync({ full }) {
     `${label} [${r.device}] extracted { ${parts} }  ` +
       `recorded new=${r.recorded.new} changed=${r.recorded.changed} unchanged=${r.recorded.unchanged}`,
   );
+  // Worth surfacing: on a backfill this should account for essentially the whole
+  // history. If it ever reads 0 there, the plans/004 freeze is not holding and
+  // the run just re-valued everything at today's rates.
+  if (r.frozen) {
+    console.log(
+      `  frozen: ${r.frozen} re-extracted events kept their stored valuation (plans/004)`,
+    );
+  }
   if (r.unpriced.length) {
     console.log(`  unpriced models: ${r.unpriced.join(", ")}`);
   }
@@ -216,6 +250,34 @@ async function cmdReprice() {
       `repriced ${updates.length}/${examined} events, net $${delta.toFixed(2)}; ` +
         `queued for shipping\n  e.g. ${sample.join("\n       ")}`,
     );
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Recovery for a lost state.sqlite. `backfill` only re-reads the harnesses,
+ * which have pruned anything past their own retention, so the JSONL archive is
+ * the only way back to older history.
+ */
+async function cmdRestoreArchive() {
+  const store = new LocalStore();
+  try {
+    const r = store.importArchive();
+    console.log(
+      `restore-archive: ${r.events} events across ${r.files} files ` +
+        `(last-wins per event)\n` +
+        `  restored ${r.restored} missing from the outbox; left ${r.present} existing rows untouched`,
+    );
+    if (r.unreadable) {
+      console.log(`  ${r.unreadable} unparseable lines skipped`);
+    }
+    if (r.restored) {
+      console.log(
+        `  queued for shipping — run 'harness-usage sync' to send them, then\n` +
+          `  'harness-usage backfill' to pick up anything newer from the harnesses`,
+      );
+    }
   } finally {
     store.close();
   }
@@ -407,6 +469,7 @@ function usage() {
   show              print the local summary
   compare           reprice stored usage against other models
   compact-archive   rewrite events/*.jsonl keeping the last line per event
+  restore-archive   reload the JSONL archive into the outbox (lost state.sqlite)
   reprice           deliberately re-value stored events (costs are frozen at ingest)
   doctor            preflight + regression checks
 
