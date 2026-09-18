@@ -108,6 +108,30 @@ function toEvent(row) {
   };
 }
 
+/**
+ * Distinct (providerID, modelID) pairs across assistant messages. Read-only,
+ * for `doctor`'s "models priced" check — so it reads the OpenCode DB the same
+ * way the extractor does rather than keeping its own copy of the loop.
+ */
+export function listModels(dbPath) {
+  const db = new DatabaseSync(expandHome(dbPath), { readOnly: true });
+  const combos = new Set();
+  try {
+    for (const r of db.prepare("SELECT data FROM message").all()) {
+      let d;
+      try {
+        d = JSON.parse(r.data);
+      } catch {
+        continue;
+      }
+      if (d.role === "assistant" && d.modelID) combos.add(`${d.providerID}\t${d.modelID}`);
+    }
+  } finally {
+    db.close();
+  }
+  return [...combos].map((c) => c.split("\t"));
+}
+
 /** Read-only helper for `doctor`: per-session sums vs the session rollup columns. */
 export function reconcile(dbPath) {
   const db = new DatabaseSync(expandHome(dbPath), { readOnly: true });

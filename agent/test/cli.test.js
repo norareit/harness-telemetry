@@ -184,3 +184,12 @@ test("10: restore-archive then sync recovers without duplicating the archive", (
   assert.match(sync.stdout, /unchanged=2/);
   assert.equal(countArchive(s.dataDir), linesBefore);
 });
+
+test("11: doctor --only runs just the named checks (plan 006 Move 3)", (t) => {
+  const s = seeded(t);
+  const r = s.run("doctor", "--only", "device name");
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /device name/);
+  assert.doesNotMatch(r.stdout, /price table/);
+  assert.match(r.stdout, /1\/1 checks passed/);
+});

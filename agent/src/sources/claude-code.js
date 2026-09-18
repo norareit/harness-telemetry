@@ -25,15 +25,27 @@ const HARNESS = "claude-code";
 
 export async function* extractClaudeCode({ store, config, full = false }) {
   const root = expandHome(config.sources["claude-code"].root || "~/.claude/projects");
+  for (const path of await listTranscripts(root)) {
+    yield* readFileIncremental({ store, path, full });
+  }
+}
 
+/**
+ * Every *.jsonl transcript path under a Claude Code projects root, in readdir
+ * order. A missing root is empty, not an error; an unreadable project dir is
+ * skipped. Shared with `doctor` so it walks the transcripts exactly as the
+ * extractor does, rather than keeping its own copy.
+ */
+export async function listTranscripts(root) {
   let projectDirs;
   try {
     projectDirs = await readdir(root, { withFileTypes: true });
   } catch (err) {
-    if (err.code === "ENOENT") return;
+    if (err.code === "ENOENT") return [];
     throw err;
   }
 
+  const out = [];
   for (const d of projectDirs) {
     if (!d.isDirectory()) continue;
     const projDir = join(root, d.name);
@@ -43,11 +55,9 @@ export async function* extractClaudeCode({ store, config, full = false }) {
     } catch {
       continue;
     }
-    for (const f of files) {
-      const path = join(projDir, f);
-      yield* readFileIncremental({ store, path, full });
-    }
+    for (const f of files) out.push(join(projDir, f));
   }
+  return out;
 }
 
 async function* readFileIncremental({ store, path, full }) {
@@ -95,7 +105,23 @@ async function* readFileIncremental({ store, path, full }) {
   });
 }
 
+// Dedupe within a batch. Cross-run dupes are caught by the idempotent PK upsert.
 function parseLine(line, seen) {
+  const rec = parseRecord(line);
+  if (!rec || seen.has(rec.dedupeKey)) return null;
+  seen.add(rec.dedupeKey);
+  return rec.event;
+}
+
+/**
+ * Everything the extractor knows about one transcript line, WITHOUT the dedupe
+ * step: `{ dedupeKey, model, usage, event }`, or null for a line it would
+ * ignore (blank, bad JSON, non-assistant, no usage, `<synthetic>`, or no
+ * requestId/uuid to dedupe on). Exported so `doctor` reads a record exactly the
+ * way the extractor does, instead of re-implementing the parse and drifting
+ * from it (review finding C7).
+ */
+export function parseRecord(line) {
   if (!line.trim()) return null;
   let rec;
   try {
@@ -109,8 +135,7 @@ function parseLine(line, seen) {
   if (msg.model === "<synthetic>") return null;
 
   const dedupeKey = rec.requestId || rec.uuid;
-  if (!dedupeKey || seen.has(dedupeKey)) return null;
-  seen.add(dedupeKey);
+  if (!dedupeKey) return null;
 
   const u = msg.usage;
   const thinking = u.output_tokens_details?.thinking_tokens ?? 0;
@@ -127,7 +152,7 @@ function parseLine(line, seen) {
 
   const provider = providerOf(msg.model);
 
-  return {
+  const event = {
     harness: HARNESS,
     session_id: rec.sessionId || rec.session_id,
     message_id: dedupeKey,
@@ -145,9 +170,10 @@ function parseLine(line, seen) {
     cache_write_5m_tokens: haveBreakdown ? cw5m : cwFlat,
     cache_write_1h_tokens: haveBreakdown ? cw1h : 0,
   };
+  return { dedupeKey, model: msg.model, usage: u, event };
 }
 
-function providerOf(model) {
+export function providerOf(model) {
   if (!model) return null;
   if (model.startsWith("claude-")) return "anthropic";
   if (model.startsWith("gpt-") || model.startsWith("o1") || model.startsWith("o3"))

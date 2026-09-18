@@ -1,23 +1,26 @@
 // `harness-usage doctor` — preflight and regression checks.
 //
-//   * resolves both source paths, reports history size
-//   * loads the price table, lists models with no entry
-//   * Claude Code dedupe regression: recompute deduped totals and compare to the
-//     baseline measured for the plan
-//   * OpenCode reconciliation: per-message sums vs the session rollup columns
-//   * tests the Postgres connection and schema
+// Each check is a named function of a shared context. It returns { ok, detail },
+// or null to mean "not applicable" (omitted from the output), or throws — a
+// throw becomes { ok: false, detail: err.message } for THAT check only, so one
+// failure can never take the rest down with it (commit 8c4d862).
+//
+// The checks that read a transcript or the OpenCode DB import the sources' own
+// parsers (parseRecord / providerOf / listTranscripts / listModels) rather than
+// re-implementing them — there is one definition of "which model is this", so
+// doctor and extraction cannot disagree (review finding C7).
 
-import { existsSync, statSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { loadConfig, expandHome, CONFIG_PATH, DATA_DIR } from "./config.js";
 import { LocalStore } from "./local-store.js";
 import { loadPricing } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
-import { reconcile } from "./sources/opencode.js";
+import { reconcile, listModels } from "./sources/opencode.js";
+import { parseRecord, providerOf, listTranscripts } from "./sources/claude-code.js";
 
 // Dedupe regression. The absolute totals drift up as the machine keeps being
 // used, so the hard assertion is on the naive/deduped RATIO, which is stable:
@@ -31,105 +34,165 @@ const CC_BASELINE = {
   minRatio: 1.5, // dedupe is clearly doing something
 };
 
-export async function runDoctor() {
-  const config = await loadConfig();
-  const checks = [];
-  const add = (name, ok, detail) => checks.push({ name, ok, detail });
+// The check registry — order IS the output order. runDoctor() with no `only`
+// produces the same array, in the same order, with the same names and details,
+// as the flat function it replaced.
+export const CHECKS = [
+  { name: "config file", run: checkConfigFile },
+  { name: "device name", run: checkDeviceName },
+  { name: "data dir", run: checkDataDir },
+  { name: "claude-code transcripts", run: checkClaudeCodeTranscripts },
+  { name: "claude-code dedupe regression", run: checkClaudeCodeDedupe },
+  { name: "opencode db", run: checkOpenCodeDb },
+  { name: "opencode reconciliation", run: checkOpenCodeReconciliation },
+  { name: "price table", run: checkPriceTable },
+  { name: "reasoning tokens billed", run: checkReasoningBilled },
+  { name: "scenarios resolve", run: checkScenariosResolve },
+  { name: "cost reproducible from stored rates", run: checkCostReproducible },
+  { name: "price table freshness", run: checkPriceTableFreshness },
+  { name: "override drift", run: checkOverrideDrift },
+  { name: "no unpriced billable events", run: checkNoUnpricedBillable },
+  { name: "models priced", run: checkModelsPriced },
+  { name: "postgres connection", run: checkPostgresConnection },
+  { name: "postgres schema", run: checkPostgresSchema },
+];
 
-  // Loaded up front: the Claude Code section prices thinking tokens with it.
+export const CHECK_NAMES = CHECKS.map((c) => c.name);
+
+/**
+ * Run the checks. `only` (array of names) restricts the run — the payoff of the
+ * registry — but with no argument the result is byte-identical to before.
+ *
+ * Context is built once: config, the price table, and a single LocalStore that
+ * the store-reading checks share (previously two were opened and closed inside
+ * blocks). The Postgres pair shares one sink via ctx.
+ */
+export async function runDoctor({ only = null } = {}) {
+  const config = await loadConfig();
+  // Loaded up front: the reasoning probe prices thinking tokens with it.
   const pricing = await loadPricing({
     modelsJsonPath: config.pricing.modelsJson,
     overridesPath: config.pricing.overrides,
   });
+  const store = new LocalStore();
+  const ctx = {
+    config,
+    pricing,
+    store,
+    ccEnabled: config.sources["claude-code"]?.enabled !== false,
+    ccRoot: expandHome(config.sources["claude-code"].root),
+    ocEnabled: config.sources.opencode?.enabled !== false,
+    ocDb: expandHome(config.sources.opencode.db),
+  };
 
-  // --- config -------------------------------------------------------------
-  add(
-    "config file",
-    Boolean(config._path),
-    config._path
-      ? config._path
+  const checks = [];
+  try {
+    for (const { name, run } of CHECKS) {
+      if (only && !only.includes(name)) continue;
+      let result;
+      try {
+        result = await run(ctx);
+      } catch (err) {
+        result = { ok: false, detail: err.message };
+      }
+      if (result == null) continue; // not applicable — omit
+      checks.push({ name, ok: result.ok, detail: result.detail });
+    }
+  } finally {
+    store.close();
+  }
+  return checks;
+}
+
+// --- checks ----------------------------------------------------------------
+
+function checkConfigFile(ctx) {
+  return {
+    ok: Boolean(ctx.config._path),
+    detail: ctx.config._path
+      ? ctx.config._path
       : `not found at ${CONFIG_PATH} — running on defaults (no DSN)`,
-  );
-  add("device name", true, config.device);
-  add("data dir", true, DATA_DIR);
+  };
+}
 
-  // --- Claude Code source ----------------------------------------------------
-  const ccEnabled = config.sources["claude-code"]?.enabled !== false;
-  const ccRoot = expandHome(config.sources["claude-code"].root);
-  if (ccEnabled) {
-    if (existsSync(ccRoot)) {
-      const files = await listJsonl(ccRoot);
-      add("claude-code transcripts", files.length > 0, `${files.length} files at ${ccRoot}`);
-      try {
-        const totals = await dedupeTotals(files);
-        const outRatio = totals.output ? totals.naiveOutput / totals.output : 1;
-        const ccRatio = totals.cacheCreation
-          ? totals.naiveCacheCreation / totals.cacheCreation
-          : 1;
-        const ok =
-          outRatio >= CC_BASELINE.minRatio &&
-          ccRatio >= CC_BASELINE.minRatio &&
-          totals.usageConflicts === 0;
-        add(
-          "claude-code dedupe regression",
-          ok,
-          `deduped output=${fmtM(totals.output)} vs naive ${fmtM(totals.naiveOutput)} (${outRatio.toFixed(2)}x), ` +
-            `cache-creation=${fmtM(totals.cacheCreation)} vs naive ${fmtM(totals.naiveCacheCreation)} (${ccRatio.toFixed(2)}x); ` +
-            `need >=${CC_BASELINE.minRatio}x. ` +
-            `ref ${CC_BASELINE.measuredOn}: output≈${fmtM(CC_BASELINE.dedupedOutputTokens)}, cache≈${fmtM(CC_BASELINE.dedupedCacheCreation)}. ` +
-            `${totals.multiUsageRequests}/${totals.uniqueRequests} requestIds repeat usage; ` +
-            `${totals.usageConflicts} usage conflicts (must be 0)`,
-        );
-      } catch (err) {
-        add("claude-code dedupe regression", false, err.message);
-      }
-    } else {
-      add("claude-code transcripts", false, `path not found: ${ccRoot}`);
-    }
+function checkDeviceName(ctx) {
+  return { ok: true, detail: ctx.config.device };
+}
+
+function checkDataDir() {
+  return { ok: true, detail: DATA_DIR };
+}
+
+async function checkClaudeCodeTranscripts(ctx) {
+  if (!ctx.ccEnabled) return null;
+  if (!existsSync(ctx.ccRoot)) return { ok: false, detail: `path not found: ${ctx.ccRoot}` };
+  const files = await listTranscripts(ctx.ccRoot);
+  return { ok: files.length > 0, detail: `${files.length} files at ${ctx.ccRoot}` };
+}
+
+async function checkClaudeCodeDedupe(ctx) {
+  if (!ctx.ccEnabled || !existsSync(ctx.ccRoot)) return null;
+  const totals = await dedupeTotals(await listTranscripts(ctx.ccRoot));
+  const outRatio = totals.output ? totals.naiveOutput / totals.output : 1;
+  const ccRatio = totals.cacheCreation
+    ? totals.naiveCacheCreation / totals.cacheCreation
+    : 1;
+  const ok =
+    outRatio >= CC_BASELINE.minRatio &&
+    ccRatio >= CC_BASELINE.minRatio &&
+    totals.usageConflicts === 0;
+  return {
+    ok,
+    detail:
+      `deduped output=${fmtM(totals.output)} vs naive ${fmtM(totals.naiveOutput)} (${outRatio.toFixed(2)}x), ` +
+      `cache-creation=${fmtM(totals.cacheCreation)} vs naive ${fmtM(totals.naiveCacheCreation)} (${ccRatio.toFixed(2)}x); ` +
+      `need >=${CC_BASELINE.minRatio}x. ` +
+      `ref ${CC_BASELINE.measuredOn}: output≈${fmtM(CC_BASELINE.dedupedOutputTokens)}, cache≈${fmtM(CC_BASELINE.dedupedCacheCreation)}. ` +
+      `${totals.multiUsageRequests}/${totals.uniqueRequests} requestIds repeat usage; ` +
+      `${totals.usageConflicts} usage conflicts (must be 0)`,
+  };
+}
+
+function checkOpenCodeDb(ctx) {
+  if (!ctx.ocEnabled) return null;
+  if (!existsSync(ctx.ocDb)) return { ok: false, detail: `path not found: ${ctx.ocDb}` };
+  try {
+    const db = new DatabaseSync(ctx.ocDb, { readOnly: true });
+    const msgs = db.prepare("SELECT COUNT(*) c FROM message").get().c;
+    const sess = db.prepare("SELECT COUNT(*) c FROM session").get().c;
+    db.close();
+    return { ok: true, detail: `${msgs} messages / ${sess} sessions at ${ctx.ocDb}` };
+  } catch (err) {
+    return { ok: false, detail: `cannot read ${ctx.ocDb}: ${err.message}` };
   }
+}
 
-  // --- OpenCode source -----------------------------------------------------
-  const ocEnabled = config.sources.opencode?.enabled !== false;
-  const ocDb = expandHome(config.sources.opencode.db);
-  if (ocEnabled) {
-    if (existsSync(ocDb)) {
-      try {
-        const db = new DatabaseSync(ocDb, { readOnly: true });
-        const msgs = db.prepare("SELECT COUNT(*) c FROM message").get().c;
-        const sess = db.prepare("SELECT COUNT(*) c FROM session").get().c;
-        db.close();
-        add("opencode db", true, `${msgs} messages / ${sess} sessions at ${ocDb}`);
+function checkOpenCodeReconciliation(ctx) {
+  if (!ctx.ocEnabled || !existsSync(ctx.ocDb)) return null;
+  const rec = reconcile(ctx.ocDb);
+  return {
+    ok: rec.ok === rec.total,
+    detail:
+      `${rec.ok}/${rec.total} sessions reconcile per-message sums vs rollup columns` +
+      (rec.mismatches.length
+        ? ` — first mismatch: ${JSON.stringify(rec.mismatches[0])}`
+        : ""),
+  };
+}
 
-        const rec = reconcile(ocDb);
-        add(
-          "opencode reconciliation",
-          rec.ok === rec.total,
-          `${rec.ok}/${rec.total} sessions reconcile per-message sums vs rollup columns` +
-            (rec.mismatches.length
-              ? ` — first mismatch: ${JSON.stringify(rec.mismatches[0])}`
-              : ""),
-        );
-      } catch (err) {
-        add("opencode db", false, `cannot read ${ocDb}: ${err.message}`);
-      }
-    } else {
-      add("opencode db", false, `path not found: ${ocDb}`);
-    }
-  }
+function checkPriceTable(ctx) {
+  return {
+    ok: !ctx.pricing.meta.tableError,
+    detail: ctx.pricing.meta.tableError
+      ? `failed to load ${ctx.pricing.meta.modelsPath}: ${ctx.pricing.meta.tableError.message}`
+      : `${countModels(ctx.pricing.table)} models from ${ctx.pricing.meta.modelsPath}`,
+  };
+}
 
-  // --- pricing -----------------------------------------------------------
-  add(
-    "price table",
-    !pricing.meta.tableError,
-    pricing.meta.tableError
-      ? `failed to load ${pricing.meta.modelsPath}: ${pricing.meta.tableError.message}`
-      : `${countModels(pricing.table)} models from ${pricing.meta.modelsPath}`,
-  );
-
-  // Regression guard for the bug where extraction normalized reasoning OUT of
-  // output_tokens while pricing still assumed it was IN, billing Anthropic
-  // thinking tokens at $0. Asserted as a unit probe so it cannot drift with the
-  // dataset: 1M reasoning tokens on opus-5 must cost the full output rate.
+// Regression guard for the bug where extraction normalized reasoning OUT of
+// output_tokens while pricing still assumed it was IN, billing Anthropic
+// thinking tokens at $0. A unit probe so it cannot drift with the dataset.
+function checkReasoningBilled(ctx) {
   const probe = {
     provider: "anthropic",
     model: "claude-opus-5",
@@ -140,228 +203,191 @@ export async function runDoctor() {
     cache_write_5m_tokens: 0,
     cache_write_1h_tokens: 0,
   };
-  // The probe needs its own rate card to state an expectation. A stale price
-  // table has no anthropic/claude-opus-5 entry at all, and reading `.card.base`
-  // off that miss threw out of runDoctor() — losing every check below to a
-  // TypeError that named neither the model nor the table. A miss fails THIS
-  // check and nothing else; "scenarios resolve" then says which else are gone.
-  const probeCard = pricing.resolve("anthropic", "claude-opus-5").card;
-  if (probeCard) {
-    const probeCost = pricing.price(probe, "free").cost_usd;
-    const expectedProbe = probeCard.base.output;
-    add(
-      "reasoning tokens billed",
-      Math.abs(probeCost - expectedProbe) < 1e-6,
-      `1M reasoning tokens on claude-opus-5 = $${probeCost} (must be $${expectedProbe}; ` +
-        `$0 means the reasoning-exclusion regression is back)`,
-    );
-  } else {
-    add(
-      "reasoning tokens billed",
-      false,
-      `cannot run: no rate card for anthropic/claude-opus-5 in ${pricing.meta.modelsPath} — ` +
+  // A stale price table has no anthropic/claude-opus-5 entry; reading .card.base
+  // off that miss must fail THIS check and nothing else.
+  const probeCard = ctx.pricing.resolve("anthropic", "claude-opus-5").card;
+  if (!probeCard) {
+    return {
+      ok: false,
+      detail:
+        `cannot run: no rate card for anthropic/claude-opus-5 in ${ctx.pricing.meta.modelsPath} — ` +
         `the table is refreshed by OpenCode, so a copy older than the model predates it. ` +
         `Refresh it, or pin the model in pricing-overrides.json`,
-    );
+    };
   }
+  const probeCost = ctx.pricing.price(probe, "free").cost_usd;
+  const expectedProbe = probeCard.base.output;
+  return {
+    ok: Math.abs(probeCost - expectedProbe) < 1e-6,
+    detail:
+      `1M reasoning tokens on claude-opus-5 = $${probeCost} (must be $${expectedProbe}; ` +
+      `$0 means the reasoning-exclusion regression is back)`,
+  };
+}
 
-  // Configured counterfactual targets must all resolve, or the dashboard
-  // silently loses a scenario.
-  const scenarios = config.scenarios || [];
-  if (scenarios.length) {
-    const unresolved = scenarios.filter((s) => !pricing.resolveKey(s).card);
-    add(
-      "scenarios resolve",
-      unresolved.length === 0,
-      unresolved.length
-        ? `no rate card for: ${unresolved.join(", ")}`
-        : scenarios
-            .map((s) => `${s} [${pricing.cacheModelOf(s)}]`)
-            .join(", "),
-    );
-  }
+function checkScenariosResolve(ctx) {
+  const scenarios = ctx.config.scenarios || [];
+  if (!scenarios.length) return null;
+  const unresolved = scenarios.filter((s) => !ctx.pricing.resolveKey(s).card);
+  return {
+    ok: unresolved.length === 0,
+    detail: unresolved.length
+      ? `no rate card for: ${unresolved.join(", ")}`
+      : scenarios.map((s) => `${s} [${ctx.pricing.cacheModelOf(s)}]`).join(", "),
+  };
+}
 
-  // Cost must be reproducible from the stored inputs alone (plans/003). This is
-  // the one invariant that does not require trusting the pricing code path that
-  // produced the number — it recomputes from the persisted rates and compares.
-  {
-    const store = new LocalStore();
-    try {
-      let total = 0;
-      let checked = 0;
-      let bad = 0;
-      let unrated = 0;
-      let firstBad = null;
-      for (const e of store.allEvents()) {
-        total++;
-        if (e.rate_input == null) {
-          // No rate card at all (ollama and friends): genuinely unpriceable, not
-          // stale. Must not be reported as something a backfill would fix.
-          if (e.priced_by === "none") unrated++;
-          continue;
-        }
-        checked++;
-        const recomputed =
-          (e.input_tokens * e.rate_input +
-            (e.output_tokens + e.reasoning_tokens) * e.rate_output +
-            e.cache_read_tokens * e.rate_cache_read +
-            e.cache_write_5m_tokens * e.rate_cache_write_5m +
-            e.cache_write_1h_tokens * e.rate_cache_write_1h) /
-          1e6;
-        if (Math.abs(recomputed - e.cost_usd) > 1e-6) {
-          bad++;
-          firstBad ??= `${e.message_id}: stored $${e.cost_usd} vs recomputed $${recomputed.toFixed(6)}`;
-        }
-      }
-      add(
-        "cost reproducible from stored rates",
-        bad === 0,
-        total === 0
-          ? "no events stored yet"
-          : `${checked}/${total} events carry rates; ${bad} mismatch` +
-            (firstBad ? ` — e.g. ${firstBad}` : "") +
-            (unrated ? `; ${unrated} have no rate card (local/unpriced — expected)` : "") +
-            (total - checked - unrated > 0
-              ? `; ${total - checked - unrated} priced but missing rates — run 'harness-usage reprice --model <provider/model>' (a backfill reuses the frozen nulls)`
-              : ""),
-      );
-    } finally {
-      store.close();
+// Cost must be reproducible from the stored inputs alone (plans/003): recompute
+// from the persisted rates and compare. The one invariant that does not require
+// trusting the pricing code path that produced the number.
+function checkCostReproducible(ctx) {
+  let total = 0;
+  let checked = 0;
+  let bad = 0;
+  let unrated = 0;
+  let firstBad = null;
+  for (const e of ctx.store.allEvents()) {
+    total++;
+    if (e.rate_input == null) {
+      // No rate card at all (ollama and friends): genuinely unpriceable, not
+      // stale. Must not be reported as something a backfill would fix.
+      if (e.priced_by === "none") unrated++;
+      continue;
+    }
+    checked++;
+    const recomputed =
+      (e.input_tokens * e.rate_input +
+        (e.output_tokens + e.reasoning_tokens) * e.rate_output +
+        e.cache_read_tokens * e.rate_cache_read +
+        e.cache_write_5m_tokens * e.rate_cache_write_5m +
+        e.cache_write_1h_tokens * e.rate_cache_write_1h) /
+      1e6;
+    if (Math.abs(recomputed - e.cost_usd) > 1e-6) {
+      bad++;
+      firstBad ??= `${e.message_id}: stored $${e.cost_usd} vs recomputed $${recomputed.toFixed(6)}`;
     }
   }
+  return {
+    ok: bad === 0,
+    detail:
+      total === 0
+        ? "no events stored yet"
+        : `${checked}/${total} events carry rates; ${bad} mismatch` +
+          (firstBad ? ` — e.g. ${firstBad}` : "") +
+          (unrated ? `; ${unrated} have no rate card (local/unpriced — expected)` : "") +
+          (total - checked - unrated > 0
+            ? `; ${total - checked - unrated} priced but missing rates — run 'harness-usage reprice --model <provider/model>' (a backfill reuses the frozen nulls)`
+            : ""),
+  };
+}
 
-  // --- price table freshness (plans/004) ---------------------------------
-  // Under the freeze a stale table is PERMANENT damage: every event ingested
-  // while it is stale is valued wrongly forever, with no self-correction on a
-  // later sync. models.json is maintained by OpenCode, not by this repo —
-  // nothing here refreshes it, so running OpenCode is what updates prices.
-  try {
-    const modelsPath = expandHome(config.pricing.modelsJson);
-    const st = await stat(modelsPath);
-    const days = (Date.now() - st.mtimeMs) / 86_400_000;
-    add(
-      "price table freshness",
-      days <= 14,
+// Under the freeze a stale table is PERMANENT damage: every event ingested while
+// it is stale is valued wrongly forever. models.json is maintained by OpenCode.
+async function checkPriceTableFreshness(ctx) {
+  const modelsPath = expandHome(ctx.config.pricing.modelsJson);
+  const st = await stat(modelsPath);
+  const days = (Date.now() - st.mtimeMs) / 86_400_000;
+  return {
+    ok: days <= 14,
+    detail:
       `${modelsPath} last updated ${days.toFixed(1)} days ago` +
-        (days > 14
-          ? " — run OpenCode to refresh it; with prices frozen at ingest, stale rates are baked in permanently"
-          : ""),
-    );
-  } catch (err) {
-    add("price table freshness", false, err.message);
-  }
+      (days > 14
+        ? " — run OpenCode to refresh it; with prices frozen at ingest, stale rates are baked in permanently"
+        : ""),
+  };
+}
 
-  // --- override drift ------------------------------------------------------
-  {
-    const { pins, checked, drift, unverifiable } = overrideDrift(pricing);
-    // A pin the table cannot confirm is NOT a pass — it is exactly the one plan
-    // 004 named as apt to "silently rot" (the Vercel-sourced terra-fast rate,
-    // whose only table entry lives under a different provider). Report it rather
-    // than count it as verified (review finding C4).
-    const note = unverifiable.length
-      ? ` — ${unverifiable.length} unverifiable, no table entry to check against: ${unverifiable.join(", ")}`
-      : "";
-    add(
-      "override drift",
-      drift.length === 0,
-      drift.length
-        ? `${drift.join("; ")} — update pricing-overrides.json if the table is now right${note}`
-        : `${checked}/${pins} pin(s) checked against the table, none diverging${note}`,
-    );
-  }
+function checkOverrideDrift(ctx) {
+  const { pins, checked, drift, unverifiable } = overrideDrift(ctx.pricing);
+  // A pin the table cannot confirm is NOT a pass — it is exactly the one plan
+  // 004 named as apt to "silently rot" (the Vercel-sourced terra-fast rate,
+  // whose only table entry lives under a different provider). Report it rather
+  // than count it as verified (review finding C4).
+  const note = unverifiable.length
+    ? ` — ${unverifiable.length} unverifiable, no table entry to check against: ${unverifiable.join(", ")}`
+    : "";
+  return {
+    ok: drift.length === 0,
+    detail: drift.length
+      ? `${drift.join("; ")} — update pricing-overrides.json if the table is now right${note}`
+      : `${checked}/${pins} pin(s) checked against the table, none diverging${note}`,
+  };
+}
 
-  // --- unpriced non-local events ------------------------------------------
-  // Frozen costs do not self-heal, so an event stored with no rate card stays
-  // at $0 until someone runs `reprice`. Local models are legitimately unpriced;
-  // anything else is a candidate for correction once an override is added.
-  {
-    const store = new LocalStore();
-    try {
-      const byModel = new Map();
-      for (const e of store.allEvents()) {
-        if (e.priced_by !== "none") continue;
-        if (e.billing === "local") continue;
-        const k = `${e.provider}/${e.model}`;
-        byModel.set(k, (byModel.get(k) || 0) + 1);
-      }
-      const total = [...byModel.values()].reduce((a, b) => a + b, 0);
-      add(
-        "no unpriced billable events",
-        byModel.size === 0,
-        byModel.size === 0
-          ? "every non-local event carries a rate card"
-          : `${total} events with no rate card: ` +
-            [...byModel].map(([k, n]) => `${k} (${n})`).join(", ") +
-            ` — add to pricing-overrides.json, then 'harness-usage reprice --unpriced-only'`,
-      );
-    } finally {
-      store.close();
-    }
+// Frozen costs do not self-heal, so an event stored with no rate card stays at
+// $0 until someone runs `reprice`. Local models are legitimately unpriced.
+function checkNoUnpricedBillable(ctx) {
+  const byModel = new Map();
+  for (const e of ctx.store.allEvents()) {
+    if (e.priced_by !== "none") continue;
+    if (e.billing === "local") continue;
+    const k = `${e.provider}/${e.model}`;
+    byModel.set(k, (byModel.get(k) || 0) + 1);
   }
+  const total = [...byModel.values()].reduce((a, b) => a + b, 0);
+  return {
+    ok: byModel.size === 0,
+    detail:
+      byModel.size === 0
+        ? "every non-local event carries a rate card"
+        : `${total} events with no rate card: ` +
+          [...byModel].map(([k, n]) => `${k} (${n})`).join(", ") +
+          ` — add to pricing-overrides.json, then 'harness-usage reprice --unpriced-only'`,
+  };
+}
 
-  const seenPairs = await modelsInUse(config);
-  const unpriced = pricing.unpricedModels(seenPairs);
-  add(
-    "models priced",
-    unpriced.length === 0,
-    unpriced.length
+async function checkModelsPriced(ctx) {
+  const seenPairs = await modelsInUse(ctx.config);
+  const unpriced = ctx.pricing.unpricedModels(seenPairs);
+  return {
+    ok: unpriced.length === 0,
+    detail: unpriced.length
       ? `no price entry for: ${unpriced.join(", ")} — add to pricing-overrides.json`
       : `all ${seenPairs.length} provider/model pairs in use resolve to a rate card`,
-  );
+  };
+}
 
-  // --- Postgres --------------------------------------------------------
-  if (config.postgres.dsn) {
-    let sink;
-    try {
-      sink = new PostgresSink(config);
-      const ok = await sink.ping();
-      const { missingTables, missingColumns } = await sink.schemaGaps();
-      add("postgres connection", ok, redactDsn(config.postgres.dsn));
-
-      const gaps = [];
-      if (missingTables.length) gaps.push(`tables: ${missingTables.join(", ")}`);
-      if (missingColumns.length) {
-        gaps.push(
-          `columns: ${missingColumns.map((m) => `${m.table}.${m.column}`).join(", ")}`,
-        );
-      }
-      add(
-        "postgres schema",
-        gaps.length === 0,
-        gaps.length === 0
-          ? "usage_event, usage_scenario complete"
-          : `missing ${gaps.join("; ")} — postgres/init only runs on an empty volume, ` +
-            `so apply server/postgres/migrations/ to an existing database ` +
-            `(psql -f). Do NOT 'down -v' unless you mean to destroy stored history.`,
-      );
-    } catch (err) {
-      add("postgres connection", false, `${redactDsn(config.postgres.dsn)}: ${err.message}`);
-    } finally {
-      if (sink) await sink.close();
-    }
-  } else {
-    add("postgres connection", false, "postgres.dsn not configured");
+async function checkPostgresConnection(ctx) {
+  if (!ctx.config.postgres.dsn) return { ok: false, detail: "postgres.dsn not configured" };
+  const sink = new PostgresSink(ctx.config);
+  try {
+    const ok = await sink.ping();
+    // Stashed for the schema check, which shares this one connection.
+    ctx._pgGaps = await sink.schemaGaps();
+    return { ok, detail: redactDsn(ctx.config.postgres.dsn) };
+  } catch (err) {
+    ctx._pgConnFailed = true;
+    return { ok: false, detail: `${redactDsn(ctx.config.postgres.dsn)}: ${err.message}` };
+  } finally {
+    await sink.close();
   }
+}
 
-  return checks;
+function checkPostgresSchema(ctx) {
+  // Only meaningful once a connection succeeded: unconfigured or a failed
+  // connection reports on the connection check alone, as before.
+  if (!ctx.config.postgres.dsn || ctx._pgConnFailed || !ctx._pgGaps) return null;
+  const { missingTables, missingColumns } = ctx._pgGaps;
+  const gaps = [];
+  if (missingTables.length) gaps.push(`tables: ${missingTables.join(", ")}`);
+  if (missingColumns.length) {
+    gaps.push(`columns: ${missingColumns.map((m) => `${m.table}.${m.column}`).join(", ")}`);
+  }
+  return {
+    ok: gaps.length === 0,
+    detail:
+      gaps.length === 0
+        ? "usage_event, usage_scenario complete"
+        : `missing ${gaps.join("; ")} — postgres/init only runs on an empty volume, ` +
+          `so apply server/postgres/migrations/ to an existing database ` +
+          `(psql -f). Do NOT 'down -v' unless you mean to destroy stored history.`,
+  };
 }
 
 // --- helpers -------------------------------------------------------------
 
-async function listJsonl(root) {
-  const out = [];
-  for (const d of await readdir(root, { withFileTypes: true })) {
-    if (!d.isDirectory()) continue;
-    const dir = join(root, d.name);
-    for (const f of await readdir(dir)) {
-      if (f.endsWith(".jsonl")) out.push(join(dir, f));
-    }
-  }
-  return out;
-}
-
 async function dedupeTotals(files) {
-  const seen = new Map(); // requestId -> { sig, count }
+  const seen = new Map(); // dedupeKey -> { sig, count }
   const usageByReq = new Map();
   let naiveOutput = 0;
   let naiveCacheCreation = 0;
@@ -373,21 +399,14 @@ async function dedupeTotals(files) {
       crlfDelay: Infinity,
     });
     for await (const line of rl) {
-      if (!line.trim()) continue;
-      let rec;
-      try {
-        rec = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (rec.type !== "assistant" || !rec.message?.usage) continue;
-      if (rec.message.model === "<synthetic>") continue;
+      const rec = parseRecord(line);
+      if (!rec) continue;
 
-      const u = rec.message.usage;
+      const u = rec.usage;
       naiveOutput += u.output_tokens || 0;
       naiveCacheCreation += u.cache_creation_input_tokens || 0;
 
-      const key = rec.requestId || rec.uuid;
+      const key = rec.dedupeKey;
       const sig = [
         u.input_tokens,
         u.output_tokens,
@@ -432,41 +451,22 @@ async function modelsInUse(config) {
   const ccRoot = expandHome(config.sources["claude-code"].root);
   if (config.sources["claude-code"]?.enabled !== false && existsSync(ccRoot)) {
     const models = new Set();
-    for (const file of await listJsonl(ccRoot)) {
+    for (const file of await listTranscripts(ccRoot)) {
       const rl = createInterface({
         input: createReadStream(file, { encoding: "utf8" }),
         crlfDelay: Infinity,
       });
       for await (const line of rl) {
-        if (!line.includes('"assistant"')) continue;
-        let rec;
-        try {
-          rec = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        const m = rec.message?.model;
-        if (m && m !== "<synthetic>") models.add(m);
+        const rec = parseRecord(line);
+        if (rec) models.add(rec.model);
       }
     }
-    for (const m of models) pairs.push([m.startsWith("claude-") ? "anthropic" : "openai", m]);
+    for (const m of models) pairs.push([providerOf(m), m]);
   }
 
   const ocDb = expandHome(config.sources.opencode.db);
   if (config.sources.opencode?.enabled !== false && existsSync(ocDb)) {
-    const db = new DatabaseSync(ocDb, { readOnly: true });
-    const combos = new Set();
-    for (const r of db.prepare("SELECT data FROM message").all()) {
-      let d;
-      try {
-        d = JSON.parse(r.data);
-      } catch {
-        continue;
-      }
-      if (d.role === "assistant" && d.modelID) combos.add(`${d.providerID}\t${d.modelID}`);
-    }
-    db.close();
-    for (const c of combos) pairs.push(c.split("\t"));
+    for (const pair of listModels(ocDb)) pairs.push(pair);
   }
 
   return pairs;
@@ -482,12 +482,6 @@ function fmtM(n) {
   return (n / 1e6).toFixed(2) + "M";
 }
 
-// Redact the password from a DSN for display.
-//
-// Must NOT use a lazy /[^@]+@/ for the password: a password containing '@'
-// (legal, and common in generated passwords) would end the match early and
-// print the remainder of the secret verbatim. The host separator is the LAST
-// '@' in the string, so anchor on that.
 /**
  * Compare each pinned override against the live table, and split the result:
  * `drift` are pins whose rates now diverge from the table (fix the pin);
@@ -516,6 +510,12 @@ export function overrideDrift(pricing) {
   return { pins: pins.length, checked: pins.length - unverifiable.length, drift, unverifiable };
 }
 
+// Redact the password from a DSN for display.
+//
+// Must NOT use a lazy /[^@]+@/ for the password: a password containing '@'
+// (legal, and common in generated passwords) would end the match early and
+// print the remainder of the secret verbatim. The host separator is the LAST
+// '@' in the string, so anchor on that.
 export function redactDsn(dsn) {
   const s = String(dsn);
   const schemeEnd = s.indexOf("://");

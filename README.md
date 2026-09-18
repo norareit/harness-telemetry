@@ -261,23 +261,31 @@ coupling to each harness that the base design avoids — not enabled by default.
 ### `doctor` checks
 
 `doctor` runs against *this machine's live data* — it answers "is the data sane
-right now", where `npm test` answers "is the code right" before it lands. Run
-`harness-usage doctor` for the current list; the load-bearing ones:
+right now", where `npm test` answers "is the code right" before it lands. Each
+check is a named entry in the `doctor.js` registry; `harness-usage doctor --only
+"<name>"` runs one. In order:
 
-* both source paths resolve; history size reported
-* price table loads and is fresh; every provider/model pair in use resolves to a
-  rate card; no billable event is stored unpriced
-* **Claude Code dedupe regression** — recomputes deduped vs naive output /
-  cache-creation totals and asserts the naive sum is still ≥1.5× the deduped one
-  (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0). Also asserts 0 usage
-  conflicts within a `requestId`.
-* **OpenCode reconciliation** — per-message token sums vs the `session` rollup columns
+* **config file / device name / data dir** — where it is reading and writing
+* **claude-code transcripts** — the source path resolves; file count
+* **claude-code dedupe regression** — deduped vs naive output / cache-creation
+  totals; the naive sum must stay ≥1.5× the deduped one (it runs ~2.2–2.3×; a
+  dedupe bug collapses it to ~1.0), and 0 usage conflicts within a `requestId`
+* **opencode db / opencode reconciliation** — the DB opens; per-message token
+  sums match the `session` rollup columns
+* **price table** — loads, model count
+* **reasoning tokens billed** — 1M reasoning tokens cost the full output rate
+  (the permanent guard against the reasoning-exclusion regression)
+* **scenarios resolve** — every configured counterfactual target has a rate card
 * **cost reproducible from stored rates** — recomputes `cost_usd` from the stored
-  token counts and applied rates; drift is a corrupted write (also the permanent
-  guard against the reasoning-token regression)
+  token counts and applied rates; drift is a corrupted write
+* **price table freshness** — `models.json` newer than 14 days (stale = permanent
+  mis-valuation under the freeze)
 * **override drift** — each pin vs the live table, reporting pins the table can no
   longer confirm rather than passing them silently
-* Postgres connection, `usage_event` / `usage_scenario` present, no missing columns
+* **no unpriced billable events** — every non-local event carries a rate card
+* **models priced** — every provider/model pair in use resolves
+* **postgres connection / postgres schema** — the DSN connects; `usage_event` and
+  `usage_scenario` exist with no missing columns
 
 ---
 

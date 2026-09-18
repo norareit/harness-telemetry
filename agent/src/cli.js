@@ -82,6 +82,7 @@ function parseArgs(argv) {
     model: null,
     scenario: null,
     dryRun: false,
+    only: [],
   };
   let i = 0;
   const value = (flag) => {
@@ -117,6 +118,9 @@ function parseArgs(argv) {
         break;
       case "--dry-run":
         o.dryRun = true;
+        break;
+      case "--only":
+        o.only.push(value("--only"));
         break;
       default:
         bail(`unknown option ${argv[i]}`);
@@ -430,7 +434,7 @@ async function cmdCompare() {
 async function cmdDoctor() {
   const config = await loadConfig();
   console.log(`harness-usage doctor  (config: ${config._path || `${CONFIG_PATH} [missing]`})\n`);
-  const checks = await runDoctor();
+  const checks = await runDoctor(opts.only.length ? { only: opts.only } : {});
   let failed = 0;
   for (const c of checks) {
     const mark = c.ok ? "ok  " : "FAIL";
@@ -479,6 +483,9 @@ function usage() {
   --model <prov/model>  restrict to one model
   --scenario <key>  drop that scenario's rows; next sync reprices them
   --dry-run         report what would change, write nothing
+
+  doctor flags:
+  --only <name>     run only the named check(s); repeatable
 
 config: ${CONFIG_PATH}`);
 }
