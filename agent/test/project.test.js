@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectRootOf } from "../src/project.js";
+import { projectRootOf, SPLIT_MARKER } from "../src/project.js";
 
 // Every temp dir is tracked and swept once at the end (these helpers get no test
 // context). The memo is keyed on the input path alone, so it is cleared per case
@@ -31,6 +31,7 @@ function tree() {
     },
     gitDir: (...p) => mkdirSync(join(dir, ...p, ".git"), { recursive: true }),
     gitFile: (...p) => writeFileSync(join(dir, ...p, ".git"), "gitdir: /elsewhere\n"),
+    split: (...p) => writeFileSync(join(dir, ...p, SPLIT_MARKER), "# split\n"),
   };
 }
 
@@ -74,6 +75,44 @@ test("a .git at or above $HOME is ignored (a dotfiles repo must not swallow ~)",
   const home = mkTmp("home-");
   mkdirSync(join(home, ".git"), { recursive: true });
   const inner = join(home, "projects", "thing");
+  mkdirSync(inner, { recursive: true });
+  projectRootOf.cache.clear();
+  assert.equal(projectRootOf(inner, { home }), inner);
+});
+
+test("split container: an immediate child of a .harness-split dir is its own project", () => {
+  const t = tree();
+  // repo/ is one git repo; repo/janestreet holds several sub-projects.
+  const inner = t.mk("repo", "janestreet", "archmadness", "puzzles");
+  t.gitDir("repo");
+  t.split("repo", "janestreet");
+  // Deeper split boundary wins over the repo's own .git.
+  assert.equal(
+    projectRootOf(inner, { home: t.home }),
+    join(t.dir, "repo", "janestreet", "archmadness"),
+  );
+});
+
+test("split container: work at the container's own root still resolves to the repo", () => {
+  const t = tree();
+  const top = t.mk("repo", "janestreet");
+  t.gitDir("repo");
+  t.split("repo", "janestreet");
+  // A path directly in janestreet (not in a child) belongs to the repo root.
+  assert.equal(projectRootOf(top, { home: t.home }), join(t.dir, "repo"));
+});
+
+test("split container works even without a repo above it", () => {
+  const t = tree();
+  const inner = t.mk("bucket", "projA", "x");
+  t.split("bucket");
+  assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "bucket", "projA"));
+});
+
+test("a split marker at/above $HOME is ignored, like .git", () => {
+  const home = mkTmp("home-");
+  writeFileSync(join(home, SPLIT_MARKER), "# split\n");
+  const inner = join(home, "thing");
   mkdirSync(inner, { recursive: true });
   projectRootOf.cache.clear();
   assert.equal(projectRootOf(inner, { home }), inner);

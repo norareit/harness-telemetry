@@ -1,6 +1,7 @@
 # Plan 008 — `project` is the repository root, not the working directory
 
-Status: **implemented** (2026-09-18). `projectRootOf` + the `project.detectRoot` switch,
+Status: **implemented** (2026-09-18, extended same day with the `.harness-split`
+split-container marker). `projectRootOf` + the `project.detectRoot` switch,
 both extractors, the `distinctProjects`/`checkProjectsAreRoots` doctor check (now 20 checks),
 the shared `rewrite-events.mjs` core (retag-device retooled onto it with byte-identical
 output; new `reroot-project.mjs`), docs and tests all landed. `npm test` green at 121.
@@ -75,9 +76,10 @@ Two consequences to accept knowingly:
 1. **Sub-projects inside one repository collapse into it.** On desktop
    `~/projects/janestreet/{andysafternoonamble,pentupfrustration,hint-singles,archmadness-qwen3-6}`
    become `janestreet`, and `norareit/assets/puzzles/andys-afternoon-amble` becomes `norareit`.
-   That is the definition doing its job: they are one repository. If a sub-project deserves
-   its own line on the dashboard, giving it its own `.git` is the honest fix. A config
-   opt-out is provided so this is reversible without a code change.
+   That is the definition doing its job: they are one repository. When that is *not* what you
+   want — a repo kept unified for convenience but several projects in the mind, which is
+   exactly `janestreet` — the **split-container marker** (below) restores per-child identity
+   without splitting the repo. A `detectRoot` opt-out also reverts the whole feature.
 2. **Non-repositories keep their working-directory names**, including their subdirectories
    (`zaphod-research` and `zaphod-research/intermediates` stay separate). That is the
    fallback the user asked for, and it is also the pre-change behaviour, so nothing regresses.
@@ -108,17 +110,48 @@ Rules, in order:
 3. **Stop before `$HOME`.** A `.git` at `$HOME` or above is ignored (a dotfiles repository in
    the home directory is common, and would otherwise swallow every project into `~`). The
    walk also never reaches `/`. If the loop ends without a hit → return `dir` unchanged.
-4. Memoise `dir → result` in a module-level `Map`. The process is short-lived, so no
+4. **Split-container marker.** Before moving to the parent, if the current dir is the
+   immediate child of a directory that holds a `.harness-split` file → return the current
+   dir. Checked *after* `.git` at the same level, but because the marker lives one level
+   above its children it is reached first when resolving a path *inside* a child, so a split
+   repo's sub-projects win over the repo's own `.git`; a path at the container's own root
+   still hits the repo `.git` and resolves to the repo. The marker parent is subject to the
+   same `$HOME` stop as `.git`. Exported as `SPLIT_MARKER`.
+5. Memoise `dir → result` in a module-level `Map`. The process is short-lived, so no
    invalidation is needed; expose `projectRootOf.cache.clear()` for tests.
 
-Pure enough to test with temp directories; no config, no store.
+Pure enough to test with temp directories; no config, no store — the split marker is on
+disk, not in config, so it travels with the repository across devices (desktop and laptop
+both see it) and needs no per-device duplication.
+
+### The split-container marker (`.harness-split`)
+
+An **empty file** named `.harness-split`, placed in a directory, declares "each of my
+immediate children is its own project". Presence is the whole signal; content is ignored
+(a comment line explaining why the file exists is encouraged). It is the escape hatch for
+`janestreet`: one `git` repo, but `archmadness`, `pentupfrustration`, `hint-singles`,
+`andysafternoonamble` are separate projects in the mind. Dropping
+`~/projects/janestreet/.harness-split` keeps each of those as its own `project`, while every
+*other* repo still collapses to its root and work at `janestreet`'s own top level stays
+`janestreet`.
+
+Chosen as a file rather than a config list because it is filesystem-native (resolved by the
+same walk as `.git`, so `reroot-project.mjs` and the doctor check honour it for free), it
+lives with the repository so it is identical on every device, and it is greppable and
+self-documenting in the tree. Scope is deliberately one level (immediate children only); a
+folder-of-folders-of-projects is not a shape we have. The marker is finicky — it changes how
+history is grouped — so the README documents it prominently.
 
 ### Extractors
 
-- `sources/claude-code.js` `parseRecord`: `project: projectRootOf(rec.cwd) || null`.
-- `sources/opencode.js` `toEvent`: `project: projectRootOf(row.session_dir || d.path?.cwd) || null`.
-  Drop the `d.path?.root` fallback: it is `/` when there is no repository, and using it would
-  make the two harnesses disagree on the rule.
+Applied in the extractor loop (`extractClaudeCode` / `extractOpenCode`), where `config` is in
+hand, rather than inside `parseRecord` — which stays a pure line parser shared with doctor and
+does no filesystem I/O. The observable result (the stored `project`) is identical.
+
+- `sources/claude-code.js`: each yielded event's `project = projectRootOf(ev.project)`.
+- `sources/opencode.js` `toEvent`: raw `project = row.session_dir || d.path?.cwd || null`,
+  resolved in the loop. Drop the `d.path?.root` fallback: it is `/` when there is no
+  repository, and using it would make the two harnesses disagree on the rule.
 
 Both behind one config switch so the old behaviour is one line away:
 
@@ -175,7 +208,7 @@ useful afterwards: a `.git` removed or added later shows up here.
 
 | File | Change |
 |---|---|
-| `agent/src/project.js` *(new)* | `projectRootOf` |
+| `agent/src/project.js` *(new)* | `projectRootOf` + `SPLIT_MARKER` (`.harness-split`) |
 | `agent/src/sources/claude-code.js` | `parseRecord` uses it (behind `project.detectRoot`) |
 | `agent/src/sources/opencode.js` | `toEvent` uses it; drop the `path.root` fallback |
 | `agent/src/config.js`, `agent/config.example.json` | `project.detectRoot`, default true |
@@ -220,6 +253,11 @@ useful afterwards: a `.git` removed or added later shows up here.
 7. On laptop, `doctor` goes red on the new check until the script is run there, then green.
 8. Flip `project.detectRoot` to false in a scratch config and run `sync --no-ship` on the
    plan-005 fixture with a nested cwd: `project` is the raw cwd again.
+9. Split container: `touch ~/projects/janestreet/.harness-split`, then
+   `node agent/scripts/reroot-project.mjs` (dry run) shows the `harness-telemetry/*` and
+   `norareit/*` subdirs collapsing but the four `janestreet/<puzzle>` paths **unchanged** (they
+   are now their own roots). `doctor` "projects are repo roots" is green with the marker in
+   place, and `--apply` leaves the janestreet puzzles as distinct projects on the dashboard.
 
 ## Out of scope
 

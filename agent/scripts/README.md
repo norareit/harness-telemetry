@@ -35,3 +35,9 @@ correction. Restart it after verifying with `harness-usage show`, `doctor`, and 
 each `project` by walking that machine's filesystem for `.git`, so a path that
 lives only on another machine is left untouched (and `doctor`'s "projects are
 repo roots" check will keep flagging it until the script is run there).
+
+If any repo should be split into per-child projects (a `.harness-split` marker —
+see the README), **create the marker before running `reroot-project.mjs`**: it
+uses the same resolver, so with the marker present the sub-projects are kept
+distinct, and without it they collapse into the repo root. Adding the marker after
+the fact means re-running the repair.

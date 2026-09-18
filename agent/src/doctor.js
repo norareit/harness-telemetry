@@ -459,8 +459,9 @@ function stalenessCheck(ctx, key, absentHint) {
   };
 }
 
-// plans/008: every stored `project` should already be a repository root (or a
-// genuine non-repository). A value that resolves to a DIFFERENT root on this
+// plans/008: every stored `project` should already be canonical — a repository
+// root, a split sub-project (.harness-split), or a genuine non-repository. A
+// value that resolves to a DIFFERENT root on this
 // machine is a subdirectory that predates the fix — repairable with
 // reroot-project.mjs. Skipped when detectRoot is off (raw cwds are then
 // intentional). A project whose path is gone here resolves to itself and is not
@@ -485,7 +486,7 @@ function checkProjectsAreRoots(ctx) {
     ok: subdirs === 0,
     detail:
       subdirs === 0
-        ? `${distinct} distinct projects, all repository roots or non-repositories`
+        ? `${distinct} distinct projects, all repository roots, split sub-projects or non-repositories`
         : `${events} events under ${subdirs} subdirector${subdirs === 1 ? "y" : "ies"} of a repo root, ` +
           `e.g. ${example} — run 'node agent/scripts/reroot-project.mjs' (dry run first)`,
   };

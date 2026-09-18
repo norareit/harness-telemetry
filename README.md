@@ -305,10 +305,10 @@ check is a named entry in the `doctor.js` registry; `harness-usage doctor --only
   `launchctl`/log) hint; this is the check that catches a dead timer, since the
   outbox and Postgres freeze at the last good run and otherwise look healthy. "last
   ship" is skipped when no DSN is configured.
-* **projects are repo roots** — every stored `project` is a repository root (or a
-  genuine non-repository); a value that resolves to a different root on this machine
-  is a pre-plan-008 subdirectory, repairable with `reroot-project.mjs`. Skipped when
-  `project.detectRoot` is false.
+* **projects are repo roots** — every stored `project` is a repository root, a
+  `.harness-split` sub-project, or a genuine non-repository; a value that resolves to a
+  different root on this machine is a pre-plan-008 subdirectory, repairable with
+  `reroot-project.mjs`. Skipped when `project.detectRoot` is false.
 
 ---
 
@@ -479,6 +479,38 @@ directory instead (pre-plan-008 behaviour). Events recorded before this was
 introduced keep their old subdirectory value until repaired in place with
 `node agent/scripts/reroot-project.mjs` (run per device — it walks that machine's
 filesystem; `doctor`'s "projects are repo roots" check flags what still needs it).
+
+#### Splitting one repo into several projects — `.harness-split`
+
+Sometimes one git repo is, in your head, several projects — a `janestreet/` repo
+that holds `archmadness`, `pentupfrustration`, `hint-singles` as distinct things.
+By default all of those collapse into `janestreet`. To keep them separate **without
+splitting the repo**, drop an empty marker file named **`.harness-split`** in the
+container directory:
+
+```sh
+touch ~/projects/janestreet/.harness-split   # content is ignored; a comment is nice
+```
+
+Now each **immediate child** of `~/projects/janestreet` (`archmadness`,
+`pentupfrustration`, …) becomes its own `project`, while:
+
+- work at `janestreet`'s own top level still resolves to `janestreet` (the repo root);
+- every *other* repo still collapses to its root as usual;
+- the marker lives in the repo, so it is identical on every device — no per-device config.
+
+The fine print, because this is finicky:
+
+- **Presence is the whole signal.** An empty file is enough; its contents are never read.
+- **One level only.** It splits the container's *immediate* children, not grandchildren.
+  A path deeper inside a child (`archmadness/puzzles/x`) still resolves to `archmadness`.
+- **It beats the repo's `.git`** for paths inside a child (the marker sits one level above
+  the children, so the walk reaches it first), which is why the sub-projects win.
+- **It only takes effect at extraction time**, on the machine that has the files — and
+  `reroot-project.mjs` honours it too, so **create the marker _before_ you run the repair**,
+  or the old rows will collapse to the repo root instead of staying split. Adding the marker
+  later means re-running the repair.
+- **Ignored at or above `$HOME`**, same as `.git`.
 
 Local readable copy: `~/.local/share/harness-usage/events/YYYY-MM-DD.jsonl`, one
 object per line. `state.sqlite` alongside holds the sync cursors and the unsynced
