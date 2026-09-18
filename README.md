@@ -169,6 +169,8 @@ $EDITOR ~/.config/harness-usage/config.json   # set device name + Postgres DSN
 config copied from another machine keeps that machine's name, and every row
 ships under it — `agent/scripts/retag-device.mjs` exists to clean that up.
 
+You also need to fill in the correct IP for the Postgres DSN and add the password there. 
+
 `bin/harness-usage` is a POSIX-sh wrapper that resolves `node` at run time (PATH,
 then `nvm.sh`, then the newest `~/.nvm/.../node`), skipping any candidate whose
 `node:sqlite` is missing — that needs Node ≥22.13, and an older one fails at
