@@ -1,6 +1,6 @@
 # Plan 002 — Counterfactual repricing: "what would this have cost elsewhere?"
 
-Status: **implemented 2026-09-09** (commit ba6fa74).
+Status: **implemented 2026-09-09** (commit 77337f0).
 Research done against the live machine on 2026-09-09; every number below was measured.
 Builds on `plans/001-harness-usage-telemetry.md` (implemented 2026-09-09).
 

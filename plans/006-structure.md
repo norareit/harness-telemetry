@@ -1,9 +1,9 @@
 # Plan 006 — Three structural moves: valuation policy, archive/outbox split, doctor reuse
 
-Status: **implemented 2026-09-18** (Move 1 b8399eb, Move 2 d5e28ff, Move 3 2238333).
+Status: **implemented 2026-09-18** (Move 1 467160d, Move 2 add9108, Move 3 c6d55b4).
 Builds on 001–004 (implemented) and **005 (unit tests), which must land first**: every move
 below is a behaviour-preserving refactor and the suite from 005 is what proves that. Written
-2026-09-18 from a structural review of the working tree at commit `bc923d6`.
+2026-09-18 from a structural review of the working tree at commit `f7f739b`.
 
 ## Context
 
@@ -33,7 +33,7 @@ review passes found bugs:
    `sources/claude-code.js`: `providerOf` there defaults unknown models to `anthropic`,
    `modelsInUse` defaults them to `openai` (review finding C7). Every check is also an
    anonymous block inside one 320-line function, so none can be run or tested alone, and one
-   uncaught throw used to take every later check with it (commit 8c4d862).
+   uncaught throw used to take every later check with it (commit 30dbd06).
 
 Not a rewrite. Three targeted moves, each an afternoon, each removing a place where bugs have
 actually been found.

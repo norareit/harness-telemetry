@@ -6,7 +6,7 @@ default 60), and dashboard panel 50 are in place. Panel 50 sits at the plan's `x
 the other four top-row panels were narrowed to fit it (the plan's sanctioned alternative to
 moving "Cache-read ratio" down).
 Builds on 001–006, all implemented. Written 2026-09-18 from review finding P1 on plan 006,
-which was prompted by the incident fixed in commit `b5aacf2`.
+which was prompted by the incident fixed in commit `c113c76`.
 
 ## Context
 
@@ -15,11 +15,11 @@ noticed. The root cause was in `agent/bin/harness-usage`, not the agent: the sys
 service's `PATH` carried no `node`, the wrapper fell through to sourcing `~/.nvm/nvm.sh`, an
 unbound variable in that script tripped the wrapper's `set -u`, and the wrapper aborted before
 its `~/.nvm` glob fallback ever ran. It launched nothing, extracted nothing, shipped nothing.
-Commit `b5aacf2` fixed that specific abort (the sourcing now happens in a subshell with
+Commit `c113c76` fixed that specific abort (the sourcing now happens in a subshell with
 `set -eu` relaxed).
 
 The fix is correct. What this plan addresses is **why thirteen hours passed unseen**, which
-`b5aacf2` did not change:
+`c113c76` did not change:
 
 1. **Exit code 3 means two different things.** The agent exits 3 for "extraction succeeded,
    shipping failed, rows queued locally" (`agent/src/cli.js:178`), and the unit whitelists it:

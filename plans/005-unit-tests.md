@@ -1,9 +1,9 @@
 # Plan 005 — Unit tests for the arithmetic and the store
 
-Status: **implemented 2026-09-18** (tests 9fb002e, C1–C4 fixes ca5ba10).
+Status: **implemented 2026-09-18** (tests b920316, C1–C4 fixes 8839a30).
 Builds on 001 (pipeline), 002 (counterfactual repricing), 003 (stored rates) and 004 (freeze
 at ingest), all implemented. Written 2026-09-18 from a full review of the working tree at
-commit `bc923d6`.
+commit `f7f739b`.
 
 ## Context
 
@@ -123,7 +123,7 @@ All against a synthetic table; rates are USD per 1e6 tokens as everywhere else.
 | 7 | Local providers are $0 before any lookup | each of `ollama`, `lmstudio`, `llamacpp`, `local`, **with** a matching table entry present | `cost_usd = 0`, `billing = 'local'`, `priced_by = 'none'`, every `rate_* = null`, `priced_at` non-null |
 | 8 | No card | unknown provider/model | `cost_usd = 0`, `priced_by = 'none'`, `billing` = the source billing passed in, rates null, `priced_at` non-null |
 | 9 | Override beats table | same key in both, different rates | `priced_by = 'override'`, override's rates applied |
-| 10 | Provider-scoped lookup only (commit 404871d) | table has only `foo/qwen3.6:27b`; `resolve("bar", "qwen3.6:27b")` | `card = null` |
+| 10 | Provider-scoped lookup only (commit 0fb35dd) | table has only `foo/qwen3.6:27b`; `resolve("bar", "qwen3.6:27b")` | `card = null` |
 | 10b | Bare-name fallback **within** a provider | table has `openrouter/qwen/qwen3.7-flash`; `resolve("openrouter", "qwen3.7-flash")` | resolves |
 | 11 | `resolveKey` splits on the first slash | `"tokengo/z-ai/glm-5.2"` | `provider = "tokengo"`, `model = "z-ai/glm-5.2"` |
 | 12 | `tableCard` ignores overrides | key overridden and in table | returns the table's rates |
@@ -237,7 +237,7 @@ the first token of each remaining line as a column name. Assert:
 
 - `redactDsn` (export it): password containing `@` and `:` is fully masked; DSN without a
   password is returned unchanged; a non-URL string is returned unchanged. This is commit
-  905d1e3's bug, currently guarded by nothing.
+  19117ba's bug, currently guarded by nothing.
 - The reasoning probe as a unit: `price({reasoning_tokens: 1e6}, ...)` equals the card's output
   rate. (Same as pricing #1, kept here so a future doctor refactor cannot drop it silently.)
 
