@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "description": "Per-device agent: reads Claude Code / OpenCode on-disk state, normalizes token usage, archives locally, upserts to Postgres.",
+  "homepage": "https://github.com/norareit/harness-telemetry",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/norareit/harness-telemetry.git"
+  },
+  "author": "Stef Klaassen <stef.klaassen@gmail.com>",
   "bin": {
     "harness-usage": "bin/harness-usage"
   },
@@ -17,5 +23,6 @@
   },
   "dependencies": {
     "pg": "^8.13.1"
-  }
+  },
+  "license": "MIT"
 }
