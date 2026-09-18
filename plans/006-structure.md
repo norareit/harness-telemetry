@@ -1,6 +1,6 @@
 # Plan 006 — Three structural moves: valuation policy, archive/outbox split, doctor reuse
 
-Status: **approved, not yet implemented.**
+Status: **implemented 2026-09-18** (Move 1 b8399eb, Move 2 d5e28ff, Move 3 2238333).
 Builds on 001–004 (implemented) and **005 (unit tests), which must land first**: every move
 below is a behaviour-preserving refactor and the suite from 005 is what proves that. Written
 2026-09-18 from a structural review of the working tree at commit `bc923d6`.
