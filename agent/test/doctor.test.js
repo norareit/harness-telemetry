@@ -52,10 +52,11 @@ test("overrideDrift flags a pin that has drifted from the table", () => {
 
 // --- checks as a registry (plan 006 Move 3) --------------------------------
 
-test("CHECK_NAMES lists the 17 checks in order", () => {
-  assert.equal(CHECK_NAMES.length, 17);
+test("CHECK_NAMES lists the 19 checks in order", () => {
+  assert.equal(CHECK_NAMES.length, 19);
   assert.equal(CHECK_NAMES[0], "config file");
-  assert.equal(CHECK_NAMES.at(-1), "postgres schema");
+  assert.equal(CHECK_NAMES.at(-1), "last ship");
+  assert.equal(CHECK_NAMES.at(-3), "postgres schema");
 });
 
 test("check 'device name' is trivially ok", () => {
@@ -145,4 +146,49 @@ test("check 'postgres schema' is omitted when unconfigured or the connection fai
   assert.equal(await check("postgres schema")({ config: { postgres: { dsn: null } } }), null);
   const failing = { config: { postgres: { dsn: "postgres://x" } }, postgres: async () => { throw new Error("refused"); } };
   assert.equal(await check("postgres schema")(failing), null);
+});
+
+// --- liveness: last sync / last ship (plans/007) ---------------------------
+
+// A ctx whose store returns one canned kv value, with a configurable threshold.
+const kvCtx = (kv, { staleAfterMinutes = 60, dsn = "postgres://x" } = {}) => ({
+  config: { sync: { staleAfterMinutes }, postgres: { dsn } },
+  store: { getKV: (k) => (k in kv ? kv[k] : null) },
+});
+const epoch = (msAgo) => String(Math.floor((Date.now() - msAgo) / 1000));
+
+test("check 'last sync': absent key fails with a prompt to run sync", () => {
+  const r = check("last sync")(kvCtx({}));
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /never recorded — run 'harness-usage sync'/);
+});
+
+test("check 'last sync': a fresh stamp passes", () => {
+  const r = check("last sync")(kvCtx({ "sync:last_run": epoch(60_000) }));
+  assert.equal(r.ok, true);
+  assert.match(r.detail, /min ago \(\d{4}-\d\d-\d\dT.*Z\)/);
+});
+
+test("check 'last sync': a stale stamp fails with the threshold and the log hint", () => {
+  const r = check("last sync")(kvCtx({ "sync:last_run": epoch(13 * 3600_000) }));
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /h ago .* exceeds sync\.staleAfterMinutes=60/);
+  assert.match(r.detail, /systemctl --user|launchctl print/);
+});
+
+test("check 'last sync': staleAfterMinutes is honoured", () => {
+  const kv = { "sync:last_run": epoch(90 * 60_000) }; // 90 min old
+  assert.equal(check("last sync")(kvCtx(kv, { staleAfterMinutes: 60 })).ok, false);
+  assert.equal(check("last sync")(kvCtx(kv, { staleAfterMinutes: 120 })).ok, true);
+});
+
+test("check 'last ship': skipped (null) when no DSN is configured", () => {
+  assert.equal(check("last ship")(kvCtx({}, { dsn: null })), null);
+});
+
+test("check 'last ship': reads its own key, fails when stale", () => {
+  const fresh = check("last ship")(kvCtx({ "sync:last_ship_ok": epoch(0) }));
+  assert.equal(fresh.ok, true);
+  const stale = check("last ship")(kvCtx({ "sync:last_ship_ok": epoch(2 * 3600_000) }));
+  assert.equal(stale.ok, false);
 });

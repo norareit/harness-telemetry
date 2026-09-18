@@ -218,3 +218,23 @@ test("importArchive restores missing events and leaves present ones untouched", 
   assert.equal(st, "unchanged");
   assert.equal(archiveLines(dir).length, before);
 });
+
+// --- resetCursors and the liveness kv keys (plans/007) ---------------------
+
+test("resetCursors clears cursors and watermark:%, but keeps sync:% liveness keys", (t) => {
+  const { store } = withStore(t);
+  store.setFileCursor("/some/transcript.jsonl", { inode: 1, offset: 42, size: 42 });
+  store.setKV("watermark:opencode", "12345");
+  store.setKV("sync:last_run", "1758000000");
+  store.setKV("sync:last_ship_ok", "1758000000");
+
+  store.resetCursors();
+
+  // backfill resets cursors so the harnesses are re-read from scratch...
+  assert.equal(store.getFileCursor("/some/transcript.jsonl"), null);
+  assert.equal(store.getKV("watermark:opencode"), null);
+  // ...but the liveness clock must survive it, or every backfill would blind
+  // doctor's staleness checks (plans/007).
+  assert.equal(store.getKV("sync:last_run"), "1758000000");
+  assert.equal(store.getKV("sync:last_ship_ok"), "1758000000");
+});

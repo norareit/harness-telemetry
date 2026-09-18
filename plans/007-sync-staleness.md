@@ -1,6 +1,10 @@
 # Plan 007 — Make a dead sync visible: launcher exit codes and a staleness signal
 
-Status: **approved, not yet implemented.**
+Status: **implemented** (2026-09-18). All three changes landed with tests; `npm test`
+green at 104. The launcher trap, the two kv stamps + doctor checks (`sync.staleAfterMinutes`,
+default 60), and dashboard panel 50 are in place. Panel 50 sits at the plan's `x:18,w:6,y:0`;
+the other four top-row panels were narrowed to fit it (the plan's sanctioned alternative to
+moving "Cache-read ratio" down).
 Builds on 001–006, all implemented. Written 2026-09-18 from review finding P1 on plan 006,
 which was prompted by the incident fixed in commit `b5aacf2`.
 

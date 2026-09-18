@@ -55,6 +55,8 @@ export const CHECKS = [
   { name: "models priced", run: checkModelsPriced },
   { name: "postgres connection", run: checkPostgresConnection },
   { name: "postgres schema", run: checkPostgresSchema },
+  { name: "last sync", run: checkLastSync },
+  { name: "last ship", run: checkLastShip },
 ];
 
 export const CHECK_NAMES = CHECKS.map((c) => c.name);
@@ -420,6 +422,46 @@ async function checkPostgresSchema(ctx) {
           `so apply server/postgres/migrations/ to an existing database ` +
           `(psql -f). Do NOT 'down -v' unless you mean to destroy stored history.`,
   };
+}
+
+// Liveness (plans/007). Two clocks stamped by runSync in kv: `sync:last_run`
+// (extraction ran to the end, written even on --no-ship) and `sync:last_ship_ok`
+// (a clean ship, nothing left queued). These are the ONLY signals that catch a
+// dead timer — the outbox, Postgres and every other check froze at the last
+// good run on 2026-09-17 and all looked healthy while nothing had run for 13h.
+function checkLastSync(ctx) {
+  return stalenessCheck(ctx, "sync:last_run", "run 'harness-usage sync'");
+}
+
+// Skipped (not applicable) when no DSN is configured: a --no-ship-only setup
+// never ships, so there is no last-ship to be stale.
+function checkLastShip(ctx) {
+  if (!ctx.config.postgres.dsn) return null;
+  return stalenessCheck(ctx, "sync:last_ship_ok", "run 'harness-usage sync'");
+}
+
+function stalenessCheck(ctx, key, absentHint) {
+  const raw = ctx.store.getKV(key);
+  if (raw == null) return { ok: false, detail: `never recorded — ${absentHint}` };
+
+  const threshold = ctx.config.sync?.staleAfterMinutes ?? 60;
+  const ageMin = (Date.now() / 1000 - Number(raw)) / 60;
+  const when = new Date(Number(raw) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const age =
+    ageMin < 60 ? `${Math.round(ageMin)} min ago` : `${(ageMin / 60).toFixed(1)} h ago`;
+  if (ageMin <= threshold) return { ok: true, detail: `${age} (${when})` };
+  return {
+    ok: false,
+    detail: `${age} (${when}) — exceeds sync.staleAfterMinutes=${threshold}; ${livenessHint()}`,
+  };
+}
+
+// Where to look when the agent has stopped running — the two places that
+// actually carry the failure, per platform.
+function livenessHint() {
+  return process.platform === "darwin"
+    ? "check 'launchctl print gui/$(id -u)/com.ritenoar.harness-usage' and ~/Library/Logs/harness-usage.log"
+    : "check 'systemctl --user status harness-usage.timer' / 'journalctl --user -u harness-usage'";
 }
 
 // --- helpers -------------------------------------------------------------

@@ -3,10 +3,25 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, unlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync, writeFileSync, mkdtempSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { scratch, readOutbox, readScenarios } from "./helpers.js";
+
+const BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "harness-usage");
+
+/** Read the kv table from a scratch data dir. */
+function readKV(dataDir) {
+  const db = new DatabaseSync(join(dataDir, "state.sqlite"), { readOnly: true });
+  try {
+    return Object.fromEntries(db.prepare("SELECT key, value FROM kv").all().map((r) => [r.key, r.value]));
+  } finally {
+    db.close();
+  }
+}
 
 const SCEN = "openrouter/anthropic/claude-sonnet-5";
 
@@ -192,4 +207,40 @@ test("11: doctor --only runs just the named checks (plan 006 Move 3)", (t) => {
   assert.match(r.stdout, /device name/);
   assert.doesNotMatch(r.stdout, /price table/);
   assert.match(r.stdout, /1\/1 checks passed/);
+});
+
+test("12: sync --no-ship stamps sync:last_run but not sync:last_ship_ok (plans/007)", (t) => {
+  const s = seeded(t); // seeded() runs `sync --no-ship`
+  const kv = readKV(s.dataDir);
+  assert.ok(kv["sync:last_run"], "last_run must be stamped even on --no-ship");
+  assert.ok(!("sync:last_ship_ok" in kv), "last_ship_ok must not be stamped without a ship");
+  // The stamp is epoch seconds, close to now.
+  assert.ok(Math.abs(Date.now() / 1000 - Number(kv["sync:last_run"])) < 120);
+});
+
+// The launcher must never exit with an agent code (0-3) on its own behalf — the
+// 2026-09-17 incident hid for 13h because a launch abort landed on 3, which the
+// unit whitelists as success. With PATH emptied, an external command the wrapper
+// needs (dirname) is missing and it aborts before exec; the EXIT trap forces 127.
+test("13: launcher aborts to 127, never an agent code, when it cannot start (plans/007)", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "harness-launcher-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const nvm = join(home, "nvm.sh");
+  writeFileSync(nvm, ': "$UNBOUND"\n'); // would trip set -u if sourced unguarded
+
+  const broken = spawnSync(BIN, ["--help"], {
+    env: { HOME: home, PATH: "/nonexistent", NVM_DIR: home },
+    encoding: "utf8",
+  });
+  assert.equal(broken.status, 127, `expected 127, got ${broken.status}: ${broken.stderr}`);
+  assert.ok(![0, 1, 2, 3].includes(broken.status), "must not collide with an agent exit code");
+  assert.match(broken.stderr, /launcher/);
+
+  // With a real PATH the wrapper starts the agent, whose --help exits 0.
+  const ok = spawnSync(BIN, ["--help"], {
+    env: { ...process.env, HOME: home },
+    encoding: "utf8",
+  });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /usage|sync|backfill/i);
 });

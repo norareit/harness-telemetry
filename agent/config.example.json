@@ -30,6 +30,11 @@
     "overrides": null
   },
 
+  "sync": {
+    "//staleAfterMinutes": "doctor's 'last sync'/'last ship' checks fail past this age. 60 suits an always-on box on a 5-min timer; raise it on a laptop that sleeps.",
+    "staleAfterMinutes": 60
+  },
+
   "//scenarios": [
     "Counterfactual targets materialized into Postgres for the dashboard.",
     "Keys are fully-qualified '<provider>/<model>' as they appear in models.json —",

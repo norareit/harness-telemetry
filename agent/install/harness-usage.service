@@ -10,7 +10,11 @@ Type=oneshot
 # Adjust the path if the repo is not at ~/projects/harness-telemetry.
 ExecStart=%h/projects/harness-telemetry/agent/bin/harness-usage sync
 Nice=10
-# Extraction always writes the local archive; a shipping failure exits 3.
+# Extraction always writes the local archive; a shipping failure exits 3, which
+# is a success for the unit (rows queued locally, next run drains them). The
+# wrapper reserves 127 for "could not start the agent" and can no longer emit 3
+# itself (see bin/harness-usage), so a launch failure now shows as Failed here
+# instead of masquerading as this whitelisted 3 (plans/007).
 SuccessExitStatus=0 3
 
 [Install]

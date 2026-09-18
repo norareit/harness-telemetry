@@ -34,7 +34,7 @@
       "id": 1,
       "title": "Month-to-date (potential) spend",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 0 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
@@ -51,7 +51,7 @@
       "id": 2,
       "title": "Spend in range",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 0 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
@@ -68,7 +68,7 @@
       "id": 3,
       "title": "Total tokens in range",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 2 }, "overrides": [] },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none", "graphMode": "none" },
@@ -85,7 +85,7 @@
       "id": 4,
       "title": "Cache-read ratio",
       "type": "gauge",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 14, "y": 0 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": { "unit": "percentunit", "min": 0, "max": 1, "decimals": 2 },
@@ -98,6 +98,36 @@
           "format": "table",
           "rawQuery": true,
           "rawSql": "SELECT CASE WHEN SUM(input_tokens + cache_read_tokens) = 0 THEN 0 ELSE SUM(cache_read_tokens)::float / SUM(input_tokens + cache_read_tokens) END AS \"cache-read ratio\" FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness)"
+        }
+      ]
+    },
+
+    {
+      "id": 50,
+      "title": "Minutes since last ship, per device",
+      "type": "stat",
+      "description": "Wall-clock minutes since each device last shipped to Postgres (max(synced_at)). Ignores the time range and $device on purpose so a silent device stays visible. A device with no new usage ships nothing, so this can stand still while the agent is healthy — 'harness-usage doctor' (last sync/last ship) is the authoritative liveness signal; this is the glanceable one.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "harness-pg" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 30 },
+            { "color": "red", "value": 180 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "values": true, "calcs": [] }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT device, EXTRACT(EPOCH FROM (now() - max(synced_at))) / 60 AS \"minutes\" FROM usage_event GROUP BY device ORDER BY device"
         }
       ]
     },

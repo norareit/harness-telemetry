@@ -219,8 +219,21 @@ so treat them as "2x or 20x", not as a budget.
 The `scenarios` list in `config.json` is the subset materialized into Postgres for the
 dashboard; set it to `[]` to skip that work entirely.
 
-`sync` exits `0` on success, `3` if extraction succeeded but shipping failed
-(rows are safely queued locally), `1` on a real error.
+Exit codes are split between the agent and its launcher (`bin/harness-usage`) so a
+launch failure can never be mistaken for a healthy run — it once was, silently, for
+13 hours (plans/007):
+
+| code | meaning | who |
+|---|---|---|
+| `0` | ok | agent |
+| `1` | error | agent |
+| `2` | usage | agent |
+| `3` | extracted, shipping failed, rows queued locally | agent |
+| `127` | launcher could not start the agent (e.g. no usable node) | wrapper |
+
+The systemd unit keeps `SuccessExitStatus=0 3` (a queued-offline run is a success);
+the wrapper reserves `127` and now aborts to it via an `EXIT` trap, so a launch
+failure shows as `Failed`, not the whitelisted `3`.
 
 ### Scheduling
 
@@ -286,6 +299,12 @@ check is a named entry in the `doctor.js` registry; `harness-usage doctor --only
 * **models priced** — every provider/model pair in use resolves
 * **postgres connection / postgres schema** — the DSN connects; `usage_event` and
   `usage_scenario` exist with no missing columns
+* **last sync / last ship** — how long since the agent last ran extraction to the
+  end, and last shipped with nothing left queued. Both fail past
+  `sync.staleAfterMinutes` (default 60) with the `systemctl`/`journalctl` (or
+  `launchctl`/log) hint; this is the check that catches a dead timer, since the
+  outbox and Postgres freeze at the last good run and otherwise look healthy. "last
+  ship" is skipped when no DSN is configured.
 
 ---
 
@@ -403,7 +422,10 @@ docker compose logs -f grafana
   Migrations are idempotent and non-destructive. Reach for `down -v` only when you
   actually intend to destroy stored history.
 * `grafana/grafana:11.4.0` — datasource and the `harness-usage` dashboard are
-  provisioned from `grafana/provisioning/`, so it comes up populated.
+  provisioned from `grafana/provisioning/`, so it comes up populated. The top row's
+  **Minutes since last ship, per device** stat (green/orange/red on 30/180 min)
+  ignores the time range and `$device` so a silent device stays visible; it is the
+  glanceable companion to `doctor`'s authoritative `last sync`/`last ship` checks.
 * Both ports are published on `${TAILSCALE_IP}` only — not the LAN, not the
   internet. Open `http://rpi5:3000` from any tailnet device.
 

@@ -23,6 +23,10 @@ const SOURCES = {
   opencode: extractOpenCode,
 };
 
+// Epoch seconds as a number, stored as a string by setKV like the OpenCode
+// watermark. doctor reads it back and diffs against now().
+const nowEpoch = () => Math.floor(Date.now() / 1000);
+
 /**
  * @param {object} opts
  * @param {boolean} opts.full   ignore cursors, re-scan everything (backfill)
@@ -39,6 +43,8 @@ export async function runSync({ full = false, noShip = false } = {}) {
   const report = {
     device: config.device,
     full,
+    lastRunAt: null, // epoch seconds stamped after extraction (plans/007)
+    lastShipOkAt: null, // epoch seconds stamped after a clean ship (plans/007)
     extracted: {},
     recorded: { new: 0, changed: 0, unchanged: 0 },
     frozen: 0, // re-extracted events whose stored valuation was reused
@@ -111,6 +117,15 @@ export async function runSync({ full = false, noShip = false } = {}) {
       });
       report.extracted[name] = count;
     }
+
+    // Liveness stamp (plans/007). The agent ran to the end of extraction —
+    // written on `--no-ship` runs too, because extraction is the half that
+    // always runs. This is what makes a silently-dead timer visible: the outbox
+    // and Postgres both freeze at the last good run and look healthy, but this
+    // clock stops. resetCursors() deletes only watermark:%, so a backfill keeps
+    // it. doctor's "last sync" check reads it back.
+    report.lastRunAt = nowEpoch();
+    store.setKV("sync:last_run", report.lastRunAt);
 
     // NOTE (plans/004): there is deliberately NO reprice pass here.
     //
@@ -192,6 +207,17 @@ export async function runSync({ full = false, noShip = false } = {}) {
       }
     } else if (!noShip && haveWork && !config.postgres.dsn) {
       report.shipError = "postgres.dsn not configured — rows queued locally";
+    }
+
+    // Liveness stamp (plans/007): shipping completed with nothing left queued.
+    // Written on a clean upsert AND on the "nothing to send" case (the tailnet
+    // was reachable, or there was simply no work) — either way no rows are
+    // stranded. NOT written on `--no-ship` (rows may be waiting by design) nor
+    // when no DSN is configured (there is no ship to succeed). doctor's "last
+    // ship" check reads it back and is skipped entirely when no DSN is set.
+    if (!noShip && config.postgres.dsn && !report.shipError) {
+      report.lastShipOkAt = nowEpoch();
+      store.setKV("sync:last_ship_ok", report.lastShipOkAt);
     }
   } finally {
     store.close();

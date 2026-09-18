@@ -21,8 +21,25 @@
 #   1. `node` already on PATH (interactive use, Homebrew, system package)
 #   2. node from a sourced nvm.sh
 #   3. ~/.nvm/versions/node/*/bin/node, newest last
+#
+# Exit-code map (plans/007). The agent owns 0-3; the launcher owns 127 and MUST
+# never emit an agent code on its own behalf:
+#   0    ok                                          (agent)
+#   1    error                                       (agent)
+#   2    usage                                       (agent)
+#   3    extracted, shipping failed, queued locally  (agent)
+#   127  launcher could not start the agent          (wrapper)
+# 3 once masqueraded as the agent's "queued offline" for 13h (2026-09-17)
+# because SuccessExitStatus=0 3 in the unit treats it as success — see the trap.
 
 set -eu
+
+# Any abort before the exec below is the LAUNCHER's failure, not the agent's.
+# Force it to 127 so it can never be mistaken for an agent exit code (in
+# particular 3, which the systemd unit whitelists as success). `exit` inside an
+# EXIT trap overrides the status in POSIX sh, dash and bash — macOS /bin/sh is
+# bash in POSIX mode — so no restructuring of the resolution logic is needed.
+trap 'code=$?; [ "$code" -eq 0 ] || { echo "harness-usage: launcher aborted before starting the agent (status $code)" >&2; exit 127; }' EXIT
 
 # Resolve $0 through any symlinks (this script is meant to be symlinked onto
 # PATH). readlink without -f works on both GNU and BSD/macOS.
@@ -106,4 +123,8 @@ if [ -z "$NODE_BIN" ]; then
   exit 127
 fi
 
+# Hand off to the agent: from here the exit status is the agent's own, so drop
+# the launcher trap first. exec replaces this shell, so the trap could not fire
+# anyway, but clearing it makes the intent explicit.
+trap - EXIT
 exec "$NODE_BIN" --no-warnings "$ENTRY" "$@"
