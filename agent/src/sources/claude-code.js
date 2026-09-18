@@ -20,13 +20,22 @@ import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { expandHome } from "../config.js";
+import { projectRootOf } from "../project.js";
 
 const HARNESS = "claude-code";
 
 export async function* extractClaudeCode({ store, config, full = false }) {
   const root = expandHome(config.sources["claude-code"].root || "~/.claude/projects");
+  // plans/008: file each event under the repository root of its cwd. Applied
+  // here, where `config` is in hand, rather than inside parseRecord (which is
+  // pure and shared with doctor). projectRootOf is a no-op when the path has no
+  // .git ancestor or no longer exists, so pre-008 behaviour is the fallback.
+  const detectRoot = config.project?.detectRoot !== false;
   for (const path of await listTranscripts(root)) {
-    yield* readFileIncremental({ store, path, full });
+    for await (const ev of readFileIncremental({ store, path, full })) {
+      if (detectRoot) ev.project = projectRootOf(ev.project);
+      yield ev;
+    }
   }
 }
 

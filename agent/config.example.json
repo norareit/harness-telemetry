@@ -35,6 +35,11 @@
     "staleAfterMinutes": 60
   },
 
+  "project": {
+    "//detectRoot": "true = file events under the nearest .git ancestor of the working directory, so subdirectories of one repo collapse into it; false = the working directory itself (pre-plan-008).",
+    "detectRoot": true
+  },
+
   "//scenarios": [
     "Counterfactual targets materialized into Postgres for the dashboard.",
     "Keys are fully-qualified '<provider>/<model>' as they appear in models.json —",

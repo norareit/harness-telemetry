@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { LocalStore } from "../src/local-store.js";
 import { extractClaudeCode } from "../src/sources/claude-code.js";
 import { extractOpenCode as _oc, reconcile as _rec } from "../src/sources/opencode.js";
+import { projectRootOf } from "../src/project.js";
 
 // Every tmp dir this file makes is tracked and removed after the run — these
 // helpers are not handed a test context, so a single top-level after() is the
@@ -273,4 +274,44 @@ test("OC: reconcile reports ok===total when rollups match, and lists a mismatch"
   });
   const badr = _rec(off.path);
   assert.equal(badr.mismatches.length, 1);
+});
+
+// --- project = repository root (plans/008) ---------------------------------
+
+// A temp repo (.git dir) with a nested working directory, under tmpdir() so the
+// $HOME stop never fires.
+function tempRepo() {
+  const dir = mkTmp();
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  const sub = join(dir, "agent", "src");
+  mkdirSync(sub, { recursive: true });
+  projectRootOf.cache.clear();
+  return { repo: dir, sub };
+}
+
+test("CC: project resolves a subdirectory cwd to the repository root", async () => {
+  const { repo, sub } = tempRepo();
+  const s = ccScratch();
+  s.writeLines([assistant({ cwd: sub })]);
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.equal(events[0].project, repo);
+});
+
+test("CC: detectRoot:false keeps the raw cwd", async () => {
+  const { sub } = tempRepo();
+  const s = ccScratch();
+  s.writeLines([assistant({ cwd: sub })]);
+  const cfg = { ...s.config, project: { detectRoot: false } };
+  const events = await collect(extractClaudeCode({ store: s.store, config: cfg, full: true }));
+  assert.equal(events[0].project, sub);
+});
+
+test("OC: project resolves a subdirectory session directory to the repository root", async () => {
+  const { repo, sub } = tempRepo();
+  const { path } = ocDb({
+    sessions: [{ id: "sess1", directory: sub }],
+    messages: [{ id: "msg1", session_id: "sess1", time_updated: 100, data: ocData() }],
+  });
+  const events = await collect(_oc({ store: ocStore(), config: { sources: { opencode: { db: path } } }, full: true }));
+  assert.equal(events[0].project, repo);
 });

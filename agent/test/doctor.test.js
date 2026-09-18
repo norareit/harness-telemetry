@@ -2,12 +2,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactDsn, overrideDrift, CHECKS, CHECK_NAMES } from "../src/doctor.js";
 import { Pricing } from "../src/pricing.js";
 import { LocalStore } from "../src/local-store.js";
+import { projectRootOf } from "../src/project.js";
 import { table, event } from "./helpers.js";
 
 // The registry's payoff: a single check runs against a hand-built context, with
@@ -52,11 +53,11 @@ test("overrideDrift flags a pin that has drifted from the table", () => {
 
 // --- checks as a registry (plan 006 Move 3) --------------------------------
 
-test("CHECK_NAMES lists the 19 checks in order", () => {
-  assert.equal(CHECK_NAMES.length, 19);
+test("CHECK_NAMES lists the 20 checks in order", () => {
+  assert.equal(CHECK_NAMES.length, 20);
   assert.equal(CHECK_NAMES[0], "config file");
-  assert.equal(CHECK_NAMES.at(-1), "last ship");
-  assert.equal(CHECK_NAMES.at(-3), "postgres schema");
+  assert.equal(CHECK_NAMES.at(-1), "projects are repo roots");
+  assert.equal(CHECK_NAMES.at(-4), "postgres schema");
 });
 
 test("check 'device name' is trivially ok", () => {
@@ -191,4 +192,42 @@ test("check 'last ship': reads its own key, fails when stale", () => {
   assert.equal(fresh.ok, true);
   const stale = check("last ship")(kvCtx({ "sync:last_ship_ok": epoch(2 * 3600_000) }));
   assert.equal(stale.ok, false);
+});
+
+// --- projects are repo roots (plans/008) -----------------------------------
+
+test("check 'projects are repo roots': flags a subdirectory of a real repo", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const store = new LocalStore({ dataDir: dir });
+  t.after(() => { try { store.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
+
+  // A real repo with a nested working dir, plus a non-repo path — only the
+  // nested one should be flagged.
+  const repo = mkdtempSync(join(tmpdir(), "repo-"));
+  const nested = join(repo, "agent", "src");
+  mkdirSync(nested, { recursive: true });
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  projectRootOf.cache.clear();
+
+  store.record(event({ message_id: "a", project: nested }));
+  store.record(event({ message_id: "b", project: nested }));
+  store.record(event({ message_id: "c", project: "/gone/from/this/machine" }));
+
+  const r = check("projects are repo roots")({ config: { project: { detectRoot: true } }, store });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /2 events under 1 subdirectory of a repo root/);
+  assert.match(r.detail, /reroot-project\.mjs/);
+});
+
+test("check 'projects are repo roots': ok when all are roots, skipped when detectRoot off", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const store = new LocalStore({ dataDir: dir });
+  t.after(() => { try { store.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
+  projectRootOf.cache.clear();
+  store.record(event({ project: "/gone/entirely" })); // resolves to itself
+  const ok = check("projects are repo roots")({ config: { project: { detectRoot: true } }, store });
+  assert.equal(ok.ok, true);
+  assert.match(ok.detail, /distinct projects, all repository roots/);
+  assert.equal(check("projects are repo roots")({ config: { project: { detectRoot: false } }, store }), null);
 });

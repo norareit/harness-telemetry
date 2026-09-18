@@ -15,7 +15,7 @@ const FIELD_ORDER = [
   "provider",
   "model",
   "agent",
-  "project",
+  "project", // repository root when one is detectable, else the working directory (plans/008)
   "git_branch",
   "is_sidechain",
   "input_tokens",

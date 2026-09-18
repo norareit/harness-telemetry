@@ -305,6 +305,10 @@ check is a named entry in the `doctor.js` registry; `harness-usage doctor --only
   `launchctl`/log) hint; this is the check that catches a dead timer, since the
   outbox and Postgres freeze at the last good run and otherwise look healthy. "last
   ship" is skipped when no DSN is configured.
+* **projects are repo roots** — every stored `project` is a repository root (or a
+  genuine non-repository); a value that resolves to a different root on this machine
+  is a pre-plan-008 subdirectory, repairable with `reroot-project.mjs`. Skipped when
+  `project.detectRoot` is false.
 
 ---
 
@@ -463,6 +467,18 @@ input_tokens output_tokens reasoning_tokens cache_read_tokens
 cache_write_5m_tokens cache_write_1h_tokens
 cost_usd  billing('api'|'local'|'free')  priced_by('table'|'override'|'none')
 ```
+
+`project` is **the repository root** the work belongs to: at extraction each
+event's working directory is resolved to its nearest `.git` ancestor (a directory
+or a file, so worktrees and submodules count), so subdirectories of one repo no
+longer split into separate "projects" on the dashboard. A working directory with
+no `.git` above it (or whose path is gone) keeps its raw value, and a `.git` at or
+above `$HOME` is ignored so a dotfiles repo cannot swallow everything into `~`. Set
+`"project": { "detectRoot": false }` in `config.json` to store the raw working
+directory instead (pre-plan-008 behaviour). Events recorded before this was
+introduced keep their old subdirectory value until repaired in place with
+`node agent/scripts/reroot-project.mjs` (run per device — it walks that machine's
+filesystem; `doctor`'s "projects are repo roots" check flags what still needs it).
 
 Local readable copy: `~/.local/share/harness-usage/events/YYYY-MM-DD.jsonl`, one
 object per line. `state.sqlite` alongside holds the sync cursors and the unsynced

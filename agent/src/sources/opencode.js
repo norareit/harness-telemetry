@@ -24,6 +24,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { expandHome } from "../config.js";
+import { projectRootOf } from "../project.js";
 
 const HARNESS = "opencode";
 const WATERMARK_KEY = "watermark:opencode:time_updated";
@@ -62,11 +63,17 @@ export async function* extractOpenCode({ store, config, full = false }) {
       )
       .all(since);
 
+    // plans/008: same repository-root rule as Claude Code, applied here where
+    // `config` is available. See extractClaudeCode for why not inside toEvent.
+    const detectRoot = config.project?.detectRoot !== false;
     let maxWatermark = since;
     for (const row of rows) {
       maxWatermark = Math.max(maxWatermark, row.time_updated);
       const ev = toEvent(row);
-      if (ev) yield ev;
+      if (ev) {
+        if (detectRoot) ev.project = projectRootOf(ev.project);
+        yield ev;
+      }
     }
 
     if (maxWatermark > since) store.setKV(WATERMARK_KEY, maxWatermark);
@@ -96,7 +103,10 @@ function toEvent(row) {
     provider: d.providerID || null,
     model: d.modelID || null,
     agent: d.agent || d.mode || null,
-    project: row.session_dir || d.path?.root || d.path?.cwd || null,
+    // Raw working directory; projectRootOf resolves it in the extractor.
+    // NOT d.path?.root — OpenCode sets that to '/' when there is no repository,
+    // which would make the two harnesses disagree on the rule (plans/008).
+    project: row.session_dir || d.path?.cwd || null,
     git_branch: row.branch || null,
     is_sidechain: Boolean(row.parent_id),
     input_tokens: t.input ?? 0,

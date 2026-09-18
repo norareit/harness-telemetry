@@ -40,6 +40,10 @@ const DEFAULTS = {
     modelsJson: "~/.cache/opencode/models.json",
     overrides: null, // defaults to bundled pricing-overrides.json
   },
+  // Project identity (plans/008). true = file each event under the nearest
+  // `.git` ancestor of its working directory (so subdirectories of one repo
+  // collapse into it); false = the working directory itself (pre-plan-008).
+  project: { detectRoot: true },
   // Liveness (plans/007). doctor's "last sync" / "last ship" checks fail once
   // the agent has not run to completion within this many minutes. 60 is
   // generous against desktop's 5-minute timer; a laptop that sleeps overnight

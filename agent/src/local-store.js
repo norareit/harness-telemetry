@@ -431,6 +431,20 @@ export class LocalStore {
     return { files, events: lastByKey.size, restored, present, unreadable };
   }
 
+  /**
+   * Distinct `project` values with their event counts, for doctor's
+   * "projects are repo roots" check (plans/008). Nulls are folded in as a row
+   * with project === null.
+   */
+  distinctProjects() {
+    return this.db
+      .prepare(
+        `SELECT json_extract(payload,'$.project') AS project, COUNT(*) AS events
+         FROM outbox GROUP BY 1`,
+      )
+      .all();
+  }
+
   // --- reporting -----------------------------------------------------------
 
   summary() {

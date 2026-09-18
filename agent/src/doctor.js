@@ -21,6 +21,8 @@ import { loadPricing } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
 import { reconcile, listModels } from "./sources/opencode.js";
 import { parseRecord, providerOf, listTranscripts } from "./sources/claude-code.js";
+import { projectRootOf } from "./project.js";
+import { homedir } from "node:os";
 
 // Dedupe regression. The absolute totals drift up as the machine keeps being
 // used, so the hard assertion is on the naive/deduped RATIO, which is stable:
@@ -57,6 +59,7 @@ export const CHECKS = [
   { name: "postgres schema", run: checkPostgresSchema },
   { name: "last sync", run: checkLastSync },
   { name: "last ship", run: checkLastShip },
+  { name: "projects are repo roots", run: checkProjectsAreRoots },
 ];
 
 export const CHECK_NAMES = CHECKS.map((c) => c.name);
@@ -454,6 +457,43 @@ function stalenessCheck(ctx, key, absentHint) {
     ok: false,
     detail: `${age} (${when}) — exceeds sync.staleAfterMinutes=${threshold}; ${livenessHint()}`,
   };
+}
+
+// plans/008: every stored `project` should already be a repository root (or a
+// genuine non-repository). A value that resolves to a DIFFERENT root on this
+// machine is a subdirectory that predates the fix — repairable with
+// reroot-project.mjs. Skipped when detectRoot is off (raw cwds are then
+// intentional). A project whose path is gone here resolves to itself and is not
+// flagged: it can only be repaired on the device that still has the files.
+function checkProjectsAreRoots(ctx) {
+  if (ctx.config.project?.detectRoot === false) return null;
+  let subdirs = 0;
+  let events = 0;
+  let example = null;
+  let distinct = 0;
+  for (const { project, events: n } of ctx.store.distinctProjects()) {
+    if (!project) continue;
+    distinct++;
+    const root = projectRootOf(project);
+    if (root !== project) {
+      subdirs++;
+      events += n;
+      example ??= `${tildify(project)} → ${tildify(root)}`;
+    }
+  }
+  return {
+    ok: subdirs === 0,
+    detail:
+      subdirs === 0
+        ? `${distinct} distinct projects, all repository roots or non-repositories`
+        : `${events} events under ${subdirs} subdirector${subdirs === 1 ? "y" : "ies"} of a repo root, ` +
+          `e.g. ${example} — run 'node agent/scripts/reroot-project.mjs' (dry run first)`,
+  };
+}
+
+function tildify(p) {
+  const home = homedir();
+  return p === home ? "~" : p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
 }
 
 // Where to look when the agent has stopped running — the two places that
