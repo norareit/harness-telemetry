@@ -341,8 +341,8 @@ export class LocalStore {
    * kept forever once written (existingScenarioPairs skips it), which is right
    * until the event's own token counts change under it — OpenCode re-reads and
    * self-corrects its watermark boundary row. When that happens sync.js has
-   * already decided the event's pricing inputs moved (frozenValuation returned
-   * null); this drops the now-stale counterfactuals keyed off the same event so
+   * already decided the event's pricing inputs moved (valueAtIngest did not
+   * reuse the stored valuation); this drops the now-stale counterfactuals keyed off the same event so
    * they cannot compare a corrected actual against an uncorrected alternative
    * (review finding C1). Keys are event keys (eventKey), which ARE the scenario
    * outbox pk.

@@ -124,3 +124,25 @@ test("check 'no unpriced billable events' flags a non-local unpriced event", (t)
   assert.equal(r.ok, false);
   assert.match(r.detail, /mystery\/who \(1\)/);
 });
+
+// C1: the postgres schema check must run on its own, via ctx.postgres(), not a
+// side channel populated by the connection check.
+test("check 'postgres schema' reports on its own when the connection works", async () => {
+  const ctx = { config: { postgres: { dsn: "postgres://x" } }, postgres: async () => ({ ok: true, gaps: { missingTables: [], missingColumns: [] } }) };
+  const r = await check("postgres schema")(ctx);
+  assert.equal(r.ok, true);
+  assert.match(r.detail, /usage_event, usage_scenario complete/);
+});
+
+test("check 'postgres schema' reports gaps", async () => {
+  const ctx = { config: { postgres: { dsn: "postgres://x" } }, postgres: async () => ({ ok: true, gaps: { missingTables: ["usage_scenario"], missingColumns: [{ table: "usage_event", column: "priced_at" }] } }) };
+  const r = await check("postgres schema")(ctx);
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /missing tables: usage_scenario; columns: usage_event\.priced_at/);
+});
+
+test("check 'postgres schema' is omitted when unconfigured or the connection fails", async () => {
+  assert.equal(await check("postgres schema")({ config: { postgres: { dsn: null } } }), null);
+  const failing = { config: { postgres: { dsn: "postgres://x" } }, postgres: async () => { throw new Error("refused"); } };
+  assert.equal(await check("postgres schema")(failing), null);
+});

@@ -100,9 +100,10 @@ export async function runSync({ full = false, noShip = false } = {}) {
             ...priced,
           });
           report.recorded[state]++;
-          // An EXISTING event that re-priced (frozen was null) means its pricing
-          // inputs moved. Its scenario rows are keyed off the same event and are
-          // now stale — mark for invalidation. A 'changed' with frozen set is a
+          // An EXISTING event that re-priced (valueAtIngest did not reuse a
+          // stored valuation, so `frozen` is false) means its pricing inputs
+          // moved. Its scenario rows are keyed off the same event and are now
+          // stale — mark for invalidation. A 'changed' with `frozen` true is a
           // non-pricing field (project, branch) moving, which scenarios ignore.
           if (state === "changed" && !frozen) invalidated.add(eventKey(raw));
           count++;

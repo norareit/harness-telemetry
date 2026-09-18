@@ -75,6 +75,14 @@ export async function runDoctor({ only = null } = {}) {
     overridesPath: config.pricing.overrides,
   });
   const store = new LocalStore();
+
+  // Two expensive things are each done at most once, on demand, and shared by
+  // whichever checks need them — memoised on the context rather than passed
+  // between checks through mutable fields. That side channel (a check stashing
+  // state for a later one) made `doctor --only "postgres schema"` a no-op when
+  // run alone, in a registry whose whole point is checks that stand on their
+  // own (review finding C1).
+  let pgSink = null;
   const ctx = {
     config,
     pricing,
@@ -83,6 +91,26 @@ export async function runDoctor({ only = null } = {}) {
     ccRoot: expandHome(config.sources["claude-code"].root),
     ocEnabled: config.sources.opencode?.enabled !== false,
     ocDb: expandHome(config.sources.opencode.db),
+
+    // One walk of the transcripts, yielding both the dedupe totals and the set
+    // of models in use — the dedupe and models-priced checks used to walk and
+    // fully parse every line separately (review finding C3).
+    ccScan() {
+      this._ccScan ??= scanTranscripts(this.ccRoot);
+      return this._ccScan;
+    },
+
+    // One Postgres connection, pinged and schema-checked once; the connection
+    // and schema checks both await it. The sink is closed in runDoctor's finally.
+    postgres() {
+      this._pg ??= (async () => {
+        pgSink = new PostgresSink(this.config);
+        const ok = await pgSink.ping();
+        const gaps = await pgSink.schemaGaps();
+        return { ok, gaps };
+      })();
+      return this._pg;
+    },
   };
 
   const checks = [];
@@ -99,6 +127,7 @@ export async function runDoctor({ only = null } = {}) {
       checks.push({ name, ok: result.ok, detail: result.detail });
     }
   } finally {
+    if (pgSink) await pgSink.close();
     store.close();
   }
   return checks;
@@ -132,7 +161,7 @@ async function checkClaudeCodeTranscripts(ctx) {
 
 async function checkClaudeCodeDedupe(ctx) {
   if (!ctx.ccEnabled || !existsSync(ctx.ccRoot)) return null;
-  const totals = await dedupeTotals(await listTranscripts(ctx.ccRoot));
+  const { totals } = await ctx.ccScan();
   const outRatio = totals.output ? totals.naiveOutput / totals.output : 1;
   const ccRatio = totals.cacheCreation
     ? totals.naiveCacheCreation / totals.cacheCreation
@@ -337,7 +366,14 @@ function checkNoUnpricedBillable(ctx) {
 }
 
 async function checkModelsPriced(ctx) {
-  const seenPairs = await modelsInUse(ctx.config);
+  const seenPairs = [];
+  if (ctx.ccEnabled && existsSync(ctx.ccRoot)) {
+    const { models } = await ctx.ccScan();
+    for (const m of models) seenPairs.push([providerOf(m), m]);
+  }
+  if (ctx.ocEnabled && existsSync(ctx.ocDb)) {
+    for (const pair of listModels(ctx.ocDb)) seenPairs.push(pair);
+  }
   const unpriced = ctx.pricing.unpricedModels(seenPairs);
   return {
     ok: unpriced.length === 0,
@@ -349,25 +385,27 @@ async function checkModelsPriced(ctx) {
 
 async function checkPostgresConnection(ctx) {
   if (!ctx.config.postgres.dsn) return { ok: false, detail: "postgres.dsn not configured" };
-  const sink = new PostgresSink(ctx.config);
   try {
-    const ok = await sink.ping();
-    // Stashed for the schema check, which shares this one connection.
-    ctx._pgGaps = await sink.schemaGaps();
+    const { ok } = await ctx.postgres();
     return { ok, detail: redactDsn(ctx.config.postgres.dsn) };
   } catch (err) {
-    ctx._pgConnFailed = true;
     return { ok: false, detail: `${redactDsn(ctx.config.postgres.dsn)}: ${err.message}` };
-  } finally {
-    await sink.close();
   }
 }
 
-function checkPostgresSchema(ctx) {
-  // Only meaningful once a connection succeeded: unconfigured or a failed
-  // connection reports on the connection check alone, as before.
-  if (!ctx.config.postgres.dsn || ctx._pgConnFailed || !ctx._pgGaps) return null;
-  const { missingTables, missingColumns } = ctx._pgGaps;
+async function checkPostgresSchema(ctx) {
+  // Unconfigured, or the connection failed: reported on the connection check
+  // alone, as before. Otherwise this makes its OWN connection when run in
+  // isolation — it no longer depends on the connection check having run first
+  // (review finding C1).
+  if (!ctx.config.postgres.dsn) return null;
+  let pg;
+  try {
+    pg = await ctx.postgres();
+  } catch {
+    return null;
+  }
+  const { missingTables, missingColumns } = pg.gaps;
   const gaps = [];
   if (missingTables.length) gaps.push(`tables: ${missingTables.join(", ")}`);
   if (missingColumns.length) {
@@ -386,14 +424,18 @@ function checkPostgresSchema(ctx) {
 
 // --- helpers -------------------------------------------------------------
 
-async function dedupeTotals(files) {
+// One walk of the transcripts producing everything the checks need: the dedupe
+// totals AND the set of models in use. Previously these were two functions that
+// each read and fully parsed every line (review finding C3).
+async function scanTranscripts(root) {
   const seen = new Map(); // dedupeKey -> { sig, count }
   const usageByReq = new Map();
+  const models = new Set();
   let naiveOutput = 0;
   let naiveCacheCreation = 0;
   let usageConflicts = 0;
 
-  for (const file of files) {
+  for (const file of await listTranscripts(root)) {
     const rl = createInterface({
       input: createReadStream(file, { encoding: "utf8" }),
       crlfDelay: Infinity,
@@ -401,6 +443,7 @@ async function dedupeTotals(files) {
     for await (const line of rl) {
       const rec = parseRecord(line);
       if (!rec) continue;
+      models.add(rec.model);
 
       const u = rec.usage;
       naiveOutput += u.output_tokens || 0;
@@ -435,41 +478,17 @@ async function dedupeTotals(files) {
   for (const s of seen.values()) if (s.count > 1) multiUsageRequests++;
 
   return {
-    output,
-    cacheCreation,
-    naiveOutput,
-    naiveCacheCreation,
-    uniqueRequests: usageByReq.size,
-    multiUsageRequests,
-    usageConflicts,
+    totals: {
+      output,
+      cacheCreation,
+      naiveOutput,
+      naiveCacheCreation,
+      uniqueRequests: usageByReq.size,
+      multiUsageRequests,
+      usageConflicts,
+    },
+    models,
   };
-}
-
-async function modelsInUse(config) {
-  const pairs = [];
-
-  const ccRoot = expandHome(config.sources["claude-code"].root);
-  if (config.sources["claude-code"]?.enabled !== false && existsSync(ccRoot)) {
-    const models = new Set();
-    for (const file of await listTranscripts(ccRoot)) {
-      const rl = createInterface({
-        input: createReadStream(file, { encoding: "utf8" }),
-        crlfDelay: Infinity,
-      });
-      for await (const line of rl) {
-        const rec = parseRecord(line);
-        if (rec) models.add(rec.model);
-      }
-    }
-    for (const m of models) pairs.push([providerOf(m), m]);
-  }
-
-  const ocDb = expandHome(config.sources.opencode.db);
-  if (config.sources.opencode?.enabled !== false && existsSync(ocDb)) {
-    for (const pair of listModels(ocDb)) pairs.push(pair);
-  }
-
-  return pairs;
 }
 
 function countModels(table) {

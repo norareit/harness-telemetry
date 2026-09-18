@@ -237,6 +237,14 @@ skipped when a source is disabled (`ccEnabled`, `ocEnabled`) return `null` to me
 applicable" and are omitted from the output, preserving today's count and order. The Postgres
 pair shares one sink through the context.
 
+> **Correction (post-implementation, review finding C1).** The first cut shared the sink by
+> having the connection check stash `ctx._pgGaps` for the schema check — a side channel that
+> made the two checks order-dependent, so `doctor --only "postgres schema"` run alone was a
+> silent no-op in a registry whose whole point is checks that stand alone. Share expensive work
+> as a **lazily-memoised context method** either check can call (`ctx.postgres()`, and likewise
+> `ctx.ccScan()` for the transcript walk — finding C3), never as a field one check writes for a
+> later one to read.
+
 `runDoctor()` with no arguments must produce the same array, in the same order, with the same
 names and details, as today. A `doctor --only <name>` flag in `cli.js` is a cheap addition and
 makes the registry visible; keep it if it is under ten lines, otherwise skip it.
