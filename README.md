@@ -256,11 +256,16 @@ he is logged in using the harnesses, and anything missed self-heals next run. Ru
 
 **laptop (macOS) — launchd LaunchAgent:**
 
+The shipped plist has `/Users/USER` placeholders in its program and log paths, so it
+does not work verbatim — fill them in while copying (and adjust the repo path if it
+is not `~/projects/harness-telemetry`):
+
 ```sh
-cp agent/install/com.ritenoar.harness-usage.plist ~/Library/LaunchAgents/
-# the plist's ProgramArguments path assumes ~/projects/harness-telemetry — edit if not
-launchctl load ~/Library/LaunchAgents/com.ritenoar.harness-usage.plist
-launchctl start com.ritenoar.harness-usage
+sed "s#/Users/USER#$HOME#g" agent/install/com.ritenoar.harness-usage.plist \
+  > ~/Library/LaunchAgents/com.ritenoar.harness-usage.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ritenoar.harness-usage.plist
+launchctl kickstart -k gui/$(id -u)/com.ritenoar.harness-usage      # run once now
+launchctl print gui/$(id -u)/com.ritenoar.harness-usage | grep -E 'state|last exit'
 tail -f ~/Library/Logs/harness-usage.log
 ```
 
