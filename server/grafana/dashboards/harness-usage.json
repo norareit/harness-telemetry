@@ -151,7 +151,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" }, "fillOpacity": 80, "lineWidth": 0 }
+          "custom": { "drawStyle": "bars", "barAlignment": 1, "stacking": { "mode": "normal" }, "fillOpacity": 80, "lineWidth": 0 }
         },
         "overrides": []
       },
@@ -161,7 +161,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, COALESCE(model, '(unpriced)') AS metric, SUM(cost_usd) AS value FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "SELECT GREATEST(date_trunc(CASE WHEN $__unixEpochTo() - $__unixEpochFrom() <= 86400 THEN 'hour' ELSE 'day' END, ts, 'Europe/Brussels'), to_timestamp($__unixEpochFrom())) AS time, COALESCE(model, '(unpriced)') AS metric, SUM(cost_usd) AS value FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
         }
       ]
     },
@@ -174,7 +174,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" }, "fillOpacity": 80, "lineWidth": 0 }
+          "custom": { "drawStyle": "bars", "barAlignment": 1, "stacking": { "mode": "normal" }, "fillOpacity": 80, "lineWidth": 0 }
         },
         "overrides": []
       },
@@ -184,7 +184,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time,\n  SUM(input_tokens) AS \"input\",\n  SUM(output_tokens) AS \"output\",\n  SUM(reasoning_tokens) AS \"reasoning\",\n  SUM(cache_read_tokens) AS \"cache read\",\n  SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS \"cache write\"\nFROM usage_event\nWHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model)\nGROUP BY 1 ORDER BY 1"
+          "rawSql": "SELECT GREATEST(date_trunc(CASE WHEN $__unixEpochTo() - $__unixEpochFrom() <= 86400 THEN 'hour' ELSE 'day' END, ts, 'Europe/Brussels'), to_timestamp($__unixEpochFrom())) AS time,\n  SUM(input_tokens) AS \"input\",\n  SUM(output_tokens) AS \"output\",\n  SUM(reasoning_tokens) AS \"reasoning\",\n  SUM(cache_read_tokens) AS \"cache read\",\n  SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS \"cache write\"\nFROM usage_event\nWHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model)\nGROUP BY 1 ORDER BY 1"
         }
       ]
     },
@@ -298,13 +298,13 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, 'actual (as billed/notional)' AS metric, SUM(cost_usd) AS value FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "SELECT GREATEST(date_trunc(CASE WHEN $__unixEpochTo() - $__unixEpochFrom() <= 86400 THEN 'hour' ELSE 'day' END, ts, 'Europe/Brussels'), to_timestamp($__unixEpochFrom())) AS time, 'actual (as billed/notional)' AS metric, SUM(cost_usd) AS value FROM usage_event WHERE $__timeFilter(ts) AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
         },
         {
           "refId": "B",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "-- Filters on the event ts, not usage_scenario_daily.day: a midnight day bucket falls outside any sub-day time range.\nSELECT $__timeGroup(e.ts, '1d') AS time, s.scenario || ' [' || s.cache_model || ']' AS metric, SUM(s.cost_usd) AS value\nFROM usage_event e\nJOIN usage_scenario s ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id\nWHERE $__timeFilter(e.ts) AND s.priced_by <> 'none' AND e.device IN ($device) AND e.harness IN ($harness) AND COALESCE(e.model, '(unknown)') IN ($model)\nGROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "-- Filters on the event ts, not usage_scenario_daily.day: a midnight day bucket falls outside any sub-day time range.\nSELECT GREATEST(date_trunc(CASE WHEN $__unixEpochTo() - $__unixEpochFrom() <= 86400 THEN 'hour' ELSE 'day' END, e.ts, 'Europe/Brussels'), to_timestamp($__unixEpochFrom())) AS time, s.scenario || ' [' || s.cache_model || ']' AS metric, SUM(s.cost_usd) AS value\nFROM usage_event e\nJOIN usage_scenario s ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id\nWHERE $__timeFilter(e.ts) AND s.priced_by <> 'none' AND e.device IN ($device) AND e.harness IN ($harness) AND COALESCE(e.model, '(unknown)') IN ($model)\nGROUP BY 1, 2 ORDER BY 1"
         }
       ]
     },
@@ -378,13 +378,13 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, model || ' · output' AS metric, avg(rate_output) AS value FROM usage_event WHERE $__timeFilter(ts) AND rate_output IS NOT NULL AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "SELECT GREATEST(date_trunc(CASE WHEN $__unixEpochTo() - $__unixEpochFrom() <= 86400 THEN 'hour' ELSE 'day' END, ts, 'Europe/Brussels'), to_timestamp($__unixEpochFrom())) AS time, model || ' · output' AS metric, avg(rate_output) AS value FROM usage_event WHERE $__timeFilter(ts) AND rate_output IS NOT NULL AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
         },
         {
           "refId": "B",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(ts, '1d') AS time, model || ' · input' AS metric, avg(rate_input) AS value FROM usage_event WHERE $__timeFilter(ts) AND rate_input IS NOT NULL AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "SELECT GREATEST(date_trunc(CASE WHEN $__unixEpochTo() - $__unixEpochFrom() <= 86400 THEN 'hour' ELSE 'day' END, ts, 'Europe/Brussels'), to_timestamp($__unixEpochFrom())) AS time, model || ' · input' AS metric, avg(rate_input) AS value FROM usage_event WHERE $__timeFilter(ts) AND rate_input IS NOT NULL AND device IN ($device) AND harness IN ($harness) AND COALESCE(model, '(unknown)') IN ($model) GROUP BY 1, 2 ORDER BY 1"
         }
       ]
     }

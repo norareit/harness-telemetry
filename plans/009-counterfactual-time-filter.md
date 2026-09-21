@@ -4,7 +4,7 @@ Type: **bug**
 Status: **fixed** (2026-09-21) in `server/grafana/dashboards/harness-usage.json`, panel 40,
 second target. Dashboard JSON validates; `npm test` green. Not yet deployed: Grafana on the
 rpi5 provisions the dashboard from this file, so the fix goes live when the rpi5 pulls it.
-Part 2 (below) is **open** and still needs a decision.
+Part 2 (below) is closed by plan 011.
 Builds on 001–008. Written 2026-09-21 after "Counterfactual cost over time — actual vs
 alternatives" showed only `actual (as billed/notional) $0` for a day with 1.44M local tokens
 on budgie (`ollama/qwen3.8:27b-128k`, `billing = 'local'`).
@@ -83,7 +83,7 @@ nothing else on the dashboard filters on its `day` column. The other panels buil
 scenarios either have no time filter (`usage_local_savings`, `usage_scenario_project`) or
 already filter on `ts`.
 
-## Part 2 (open): daily buckets fall off-canvas on sub-day ranges
+## Part 2 (fixed by plan 011): daily buckets fall off-canvas on sub-day ranges
 
 Four time-series panels group by `$__timeGroup(ts, '1d')`:
 
