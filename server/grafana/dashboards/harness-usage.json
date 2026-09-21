@@ -294,7 +294,7 @@
           "refId": "B",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(day, '1d') AS time, scenario || ' [' || cache_model || ']' AS metric, SUM(scenario_cost_usd) AS value FROM usage_scenario_daily WHERE $__timeFilter(day) AND device IN ($device) AND harness IN ($harness) GROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "-- Filters on the event ts, not usage_scenario_daily.day: a midnight day bucket falls outside any sub-day time range.\nSELECT $__timeGroup(e.ts, '1d') AS time, s.scenario || ' [' || s.cache_model || ']' AS metric, SUM(s.cost_usd) AS value\nFROM usage_event e\nJOIN usage_scenario s ON s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id\nWHERE $__timeFilter(e.ts) AND s.priced_by <> 'none' AND e.device IN ($device) AND e.harness IN ($harness)\nGROUP BY 1, 2 ORDER BY 1"
         }
       ]
     },
