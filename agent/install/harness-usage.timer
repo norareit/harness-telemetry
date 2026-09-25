@@ -3,10 +3,11 @@ Description=Run harness usage telemetry sync every 5 minutes
 Documentation=https://bitbucket.org/ritenoar/harness-telemetry
 
 [Timer]
-OnBootSec=2min
+# OnStartupSec counts from the user manager's start (login). OnBootSec would count from kernel boot: a login more
+# than 2 min after boot leaves it already elapsed, the service never runs, and OnUnitActiveSec has no base, so the
+# timer stays dead for the whole session (plans/012). Persistent= only applies to OnCalendar=, hence not used.
+OnStartupSec=2min
 OnUnitActiveSec=5min
-# Catch up a single missed run after the machine was powered off / logged out.
-Persistent=true
 AccuracySec=30s
 
 [Install]

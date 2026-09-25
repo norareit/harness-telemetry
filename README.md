@@ -236,9 +236,11 @@ systemctl --user list-timers | grep harness-usage      # confirm it is armed
 journalctl --user -u harness-usage -f                   # watch a run
 ```
 
-`Persistent=true` catches up one missed run after boot. User timers only run while the user has a login session
-(`Linger=no`) — that is fine, new data only appears while he is logged in using the harnesses, and anything missed
-self-heals next run. Run `sudo loginctl enable-linger $USER` only if headless operation is ever wanted.
+The first run is 2 minutes after login (`OnStartupSec`, not `OnBootSec`, which counts from kernel boot and never
+fires if login is later than that; plan 012), then every 5 minutes. After updating the repo, re-copy the timer,
+`daemon-reload` and `systemctl --user restart harness-usage.timer`. User timers only run while the user has a login
+session (`Linger=no`). That is fine: new data only appears while someone is logged in using the harnesses, and
+anything missed self-heals on the next run. Run `sudo loginctl enable-linger $USER` only if headless operation is ever wanted.
 
 **laptop (macOS) — launchd LaunchAgent:**
 
