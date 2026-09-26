@@ -20,6 +20,16 @@ import { HASH_VERSION, orderFields, sourceHash } from "../../src/archive.js";
 import { eventDay } from "../../src/record.js";
 
 /**
+ * A `map` for rewriteEvents that files every event of the given sessions under
+ * project `to` (plans/014). Session ids match exactly — no prefixes — so a short
+ * id cannot catch a neighbour. Events already on `to` are left alone.
+ */
+export function retagSessions(sessionIds, to) {
+  const ids = new Set(sessionIds);
+  return (ev) => (ids.has(ev.session_id) && ev.project !== to ? { ...ev, project: to } : null);
+}
+
+/**
  * Rewrite already-recorded events in place. `map(ev)` returns the new event, or
  * null/undefined to leave that event alone. `map` must not change the identity
  * fields (harness, session_id, message_id) — the primary key must stay put.

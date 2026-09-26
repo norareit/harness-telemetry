@@ -1,4 +1,4 @@
-// scripts.test.js — the shared repair core rewriteEvents (plans/008).
+// scripts.test.js — the shared repair core rewriteEvents (plans/008) and its maps (plans/014).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalStore } from "../src/local-store.js";
 import { eventKey } from "../src/record.js";
-import { rewriteEvents } from "../scripts/lib/rewrite-events.mjs";
+import { rewriteEvents, retagSessions } from "../scripts/lib/rewrite-events.mjs";
 import { event } from "./helpers.js";
 
 function withDir(t) {
@@ -99,4 +99,31 @@ test("refuses to write while a legacy (pre-v2) archive hash exists", (t) => {
   const check = new LocalStore({ dataDir: dir });
   t.after(() => check.close());
   for (const e of check.allEvents()) assert.equal(e.project, "/repo/sub", "outbox untouched");
+});
+
+test("retagSessions moves every event of the listed sessions only", (t) => {
+  const dir = withDir(t);
+  seed(dir, [
+    { session_id: "abc-1", project: "/norareit" },
+    { session_id: "abc-1", message_id: "m2", project: "/norareit" },
+    { session_id: "abc-2", project: "/norareit" }, // a neighbour sharing the prefix
+    { session_id: "def", project: "/kit" }, // already on the target
+  ]);
+  const r = rewriteEvents({ dataDir: dir, map: retagSessions(["abc-1", "def", "abc"], "/kit"), apply: true });
+  assert.equal(r.changed, 2, "both messages of abc-1; not def (already there), not abc-2 (no prefix match)");
+
+  const store = new LocalStore({ dataDir: dir });
+  t.after(() => store.close());
+  const bySession = Object.fromEntries(store.allEvents().map((e) => [e.session_id + "/" + e.message_id, e.project]));
+  assert.deepEqual(bySession, {
+    "abc-1/m1": "/kit",
+    "abc-1/m2": "/kit",
+    "abc-2/m1": "/norareit",
+    "def/m1": "/kit",
+  });
+  for (const line of archiveLines(dir)) {
+    const e = JSON.parse(line);
+    assert.equal(e.project, bySession[e.session_id + "/" + e.message_id], "archive agrees with the outbox");
+  }
+  assert.equal(store.record(event({ session_id: "abc-1", project: "/kit" })), "unchanged");
 });

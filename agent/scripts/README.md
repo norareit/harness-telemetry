@@ -19,6 +19,7 @@ thin `map(ev)` over it.
 |---|---|
 | `retag-device.mjs` | events recorded under the wrong `device` name — a config copied from another machine and never edited |
 | `reroot-project.mjs` | events filed under a subdirectory of a repo (`project` was the raw cwd before plan 008) — re-files them under the repository root |
+| `retag-project.mjs` | whole sessions filed under the wrong project, e.g. run from another repo's dir (plan 014) |
 
 Every script takes `--apply` and does nothing without it. Before running one:
 
@@ -41,3 +42,6 @@ see the README), **create the marker before running `reroot-project.mjs`**: it
 uses the same resolver, so with the marker present the sub-projects are kept
 distinct, and without it they collapse into the repo root. Adding the marker after
 the fact means re-running the repair.
+
+`retag-project.mjs` is undone by a `backfill`: backfill re-extracts from the transcripts, where the cwd is still the
+old directory. Normal syncs read from their byte cursor and never re-extract. Re-run the retag after a backfill.
