@@ -22,9 +22,10 @@
 // exactly. Any id that matches no event aborts the run before anything is written.
 
 import { DatabaseSync } from "node:sqlite";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DATA_DIR } from "../src/config.js";
-import { projectRootOf } from "../src/project.js";
+import { isProjectRoot, projectRootOf } from "../src/project.js";
 import { rewriteEvents, retagSessions } from "./lib/rewrite-events.mjs";
 
 const args = process.argv.slice(2);
@@ -42,8 +43,11 @@ if (!TO || !SESSIONS.length) {
   console.error("usage: retag-project.mjs --to DIR [--data-dir DIR] [--apply] SESSION_ID…");
   process.exit(2);
 }
-if (projectRootOf(TO) !== TO) {
-  console.error(`--to ${TO} is not a project root (it resolves to ${projectRootOf(TO)}).`);
+// Positively a repo root or split sub-project: projectRootOf returns a mistyped
+// or plain directory unchanged, so "resolves to itself" alone would accept it.
+if (!isProjectRoot(TO)) {
+  const hint = existsSync(TO) ? `it resolves to ${projectRootOf(TO)}` : "it does not exist";
+  console.error(`--to ${TO} is not a project root (${hint}).`);
   process.exit(2);
 }
 

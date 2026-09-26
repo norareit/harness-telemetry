@@ -76,6 +76,28 @@ export function projectRootOf(dir, { home = os.homedir(), fs = nodeFs } = {}) {
   return result;
 }
 
+/**
+ * Whether `dir` is a project root in its own right: it exists, holds a `.git` or
+ * is the immediate child of a split container (under the same $HOME boundary as
+ * projectRootOf), and resolves to itself. Unlike `projectRootOf(dir) === dir`,
+ * this is false for a mistyped path or a plain directory — projectRootOf returns
+ * those unchanged. For validating a user-given target project (plans/014).
+ *
+ * @param {string|null} dir  an absolute path, without a trailing slash
+ * @param {object} [o]  as for projectRootOf
+ * @returns {boolean}
+ */
+export function isProjectRoot(dir, { home = os.homedir(), fs = nodeFs } = {}) {
+  if (!dir || !exists(fs, dir)) return false;
+  const stop = trimSlash(home);
+  const parent = dirname(dir);
+  if (trimSlash(dir) === stop) return false;
+  const marked =
+    exists(fs, join(dir, ".git")) ||
+    (parent !== dir && trimSlash(parent) !== stop && exists(fs, join(parent, SPLIT_MARKER)));
+  return marked && projectRootOf(dir, { home, fs }) === dir;
+}
+
 // The memo is process-lifetime; a run is short and the tree does not move under
 // it. Tests that build and tear down temp repos clear it between cases.
 projectRootOf.cache = cache;

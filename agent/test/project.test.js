@@ -1,11 +1,11 @@
-// project.test.js — projectRootOf, the repository-root resolver (plans/008).
+// project.test.js — projectRootOf, the repository-root resolver (plans/008), and isProjectRoot (plans/014).
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectRootOf, SPLIT_MARKER } from "../src/project.js";
+import { isProjectRoot, projectRootOf, SPLIT_MARKER } from "../src/project.js";
 
 // Every temp dir is tracked and swept once at the end (these helpers get no test
 // context). The memo is keyed on the input path alone, so it is cleared per case
@@ -134,4 +134,28 @@ test("memoisation: a second call with the same input does not touch the fs", () 
   const again = projectRootOf(inner, { home: t.home, fs: spy });
   assert.equal(again, root);
   assert.equal(calls, 0, "cached call must not hit the filesystem");
+});
+
+test("isProjectRoot: a repo root or a split sub-project is a root", () => {
+  const t = tree();
+  t.mk("repo", "src");
+  t.gitDir("repo");
+  t.mk("js", "puzzle");
+  t.split("js");
+  assert.equal(isProjectRoot(join(t.dir, "repo"), { home: t.home }), true);
+  assert.equal(isProjectRoot(join(t.dir, "js", "puzzle"), { home: t.home }), true);
+});
+
+test("isProjectRoot: a typo, a plain dir, a repo subdir and $HOME are not", () => {
+  const t = tree();
+  t.mk("repo", "src");
+  t.gitDir("repo");
+  const plain = t.mk("plain");
+  // A typo and a plain dir both resolve to themselves; that alone must not pass.
+  assert.equal(projectRootOf(join(t.dir, "repp"), { home: t.home }), join(t.dir, "repp"));
+  assert.equal(isProjectRoot(join(t.dir, "repp"), { home: t.home }), false);
+  assert.equal(isProjectRoot(plain, { home: t.home }), false);
+  assert.equal(isProjectRoot(join(t.dir, "repo", "src"), { home: t.home }), false);
+  mkdirSync(join(t.home, ".git"));
+  assert.equal(isProjectRoot(t.home, { home: t.home }), false, "a dotfiles repo in ~ is not a project");
 });

@@ -1,10 +1,11 @@
 # Plan 014 — Re-file whole sessions under a different project
 
 Type: **task**
-Status: **implemented** (2026-09-26). `npm test` is green at 127. On a scratch copy of the desktop data dir: the dry
+Status: **implemented** (2026-09-26). `npm test` is green at 129. On a scratch copy of the desktop data dir: the dry
 run listed 2085 events in the 12 sessions, `--apply` moved them (norareit $433 → $148, agent-kit $6 → $291
 notional), all 2085 were re-queued, the archive kept its 9109 lines (rewritten, not appended), and a re-run found
-0 to retag. An unknown ID and a non-root `--to` were both refused. The real run on desktop is still to be done.
+0 to retag. An unknown ID was refused, and so were `--to` values that are a typo, a plain directory or a repo
+subdirectory. The real run on desktop is still to be done.
 
 ## Feature
 
@@ -30,13 +31,16 @@ a permanent feature for a one-time mistake.
    returns null. Session IDs are matched **exactly** (no prefixes), so a short ID can't catch the wrong session.
 2. `agent/scripts/retag-project.mjs`:
    - usage: `retag-project.mjs --to DIR [--data-dir DIR] [--apply] SESSION_ID…`
-   - refuses (exit 2) when `--to` isn't its own `projectRootOf` (not a repo root). Otherwise `doctor`'s "projects are
-     repo roots" check would flag the result.
+   - refuses (exit 2) unless `--to` is positively a project root: `isProjectRoot` in `src/project.js` (exists, holds
+     `.git` or is a split container's child, and resolves to itself). `projectRootOf(TO) === TO` is not enough:
+     projectRootOf returns a mistyped path or a plain directory unchanged, so a typo would pass (review finding).
    - dry-run review table from the outbox: per session, the event count and the current project(s).
    - lists any session ID that matches no outbox row and exits 1 without writing. A typo must not look like success.
    - same legacy-hash refusal and `--apply` behaviour as `retag-device.mjs`.
 3. `agent/scripts/README.md`: add a table row, plus a note that `backfill` reverts the retag.
-4. `agent/test/scripts.test.js`: `retagSessions` moves only the listed sessions (every message of each), leaves other
+4. `agent/test/project.test.js`: `isProjectRoot` accepts a repo root and a split child; it rejects a typo, a plain
+   directory, a repo subdirectory and `$HOME`.
+5. `agent/test/scripts.test.js`: `retagSessions` moves only the listed sessions (every message of each), leaves other
    sessions and already-retagged events alone, doesn't prefix-match, and a re-record of a retagged event is
    `unchanged`.
 
