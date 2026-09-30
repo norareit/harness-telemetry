@@ -54,8 +54,11 @@ const DEFAULTS = {
   // written before this feature still gets scenarios. Set to [] to opt out.
   // `harness-usage compare --as <key>` is not limited to this list.
   scenarios: [
+    "openrouter/anthropic/claude-opus-5.5",
     "openrouter/anthropic/claude-opus-5",
     "openrouter/anthropic/claude-sonnet-5",
+    "openrouter/openai/gpt-6-sol",
+    "openrouter/openai/gpt-6-luna",
     "openrouter/openai/gpt-6-astra",
     "openrouter/google/gemini-3.1-pro-preview",
     "openrouter/qwen/qwen3.7-flash",
