@@ -1,12 +1,16 @@
 {
   "_comment": [
-    "Pins and fills for the auto-updating ~/.cache/opencode/models.json price table.",
-    "Two jobs: (1) cover models with no table entry, (2) freeze rates for models whose",
-    "prices we have already attributed to historical rows, so a models.json refresh does",
-    "not silently reprice the past. Keys are '<provider>/<model>'. Rates are USD per",
-    "million tokens. 'cache_write_1h' is optional; when absent the Anthropic rule in",
-    "pricing.js computes it as 2x input. An entry with all-zero rates is a valid way to",
-    "declare a model genuinely free (priced_by stays 'override', billing per source)."
+    "Pins and fills for the ~/.cache/opencode/models.json price table (refreshed only",
+    "while OpenCode runs; see README 'The price table depends on OpenCode').",
+    "Two jobs: (1) cover models with no table entry, (2) pin a rate to use in place of",
+    "the table's. A pin does NOT protect history: stored rows are valued once at ingest",
+    "(plan 004) and a table refresh never touches them. A pin only steers future ingests",
+    "and explicit 'reprice' runs, and can drift from the table ('doctor' checks for this),",
+    "so don't add one that merely duplicates the table. Keys are '<provider>/<model>'.",
+    "Rates are USD per million tokens. 'cache_write_1h' is optional; when absent the",
+    "Anthropic rule in pricing.js computes it as 2x input. An entry with all-zero rates",
+    "is a valid way to declare a model genuinely free (priced_by stays 'override',",
+    "billing per source)."
   ],
   "//openai/gpt-5.6-terra-fast": [
     "models.json has NO gpt-5.6-terra-fast under the 'openai' provider — only",

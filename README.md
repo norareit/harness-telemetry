@@ -298,7 +298,8 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
 
 ## Pricing
 
-Rates come from `~/.cache/opencode/models.json` (auto-updating, covers both harnesses). `agent/pricing-overrides.json`
+Rates come from `~/.cache/opencode/models.json` (covers both harnesses, but only refreshed while OpenCode runs — see
+[The price table depends on OpenCode](#the-price-table-depends-on-opencode)). `agent/pricing-overrides.json`
 does two jobs: it fills table misses (a model the table does not carry, or carries only under another provider), and it
 pins a rate you want to use in place of the table's. Note it is **not** what protects historical rows from a table
 update — the plan-004 freeze does that, by valuing each row once at ingest. That makes a pin pure forward policy: it
@@ -369,6 +370,27 @@ harness-usage reprice --scenario openrouter/qwen/qwen3.7-flash   # drop + recomp
 
 Because frozen costs do not self-heal, `doctor` now watches the two things that would otherwise rot silently: the age of
 `models.json` (which OpenCode maintains, not this repo) and any pinned override that has diverged from the live table.
+
+### The price table depends on OpenCode
+
+The agent only **reads** `models.json`; OpenCode writes it, and only while OpenCode is running. Nothing in this repo
+refreshes it. On a machine where you mostly use Claude Code, the table stays at whatever OpenCode last fetched, even
+though it prices Claude Code events too.
+
+Combined with the ingest freeze, that has a sharp edge: a model released after the last OpenCode launch has no rate
+card, so every event for it is stored at `$0` (`priced_by='none'`) and **stays** there, even after the table catches
+up. Real case: Opus 5.5 was used in Claude Code from 2026-09-23, but OpenCode had not run since early July. Opening
+OpenCode on 2026-09-25 refreshed the table, so events from then on priced normally, but the 92 events before it stayed
+at `$0` until an explicit `reprice` five days later.
+
+Each machine has its own `models.json`, so each can be stale independently. `doctor` flags both symptoms — a table older
+than 14 days, and unpriced billable events — but only when it is run. Recovery:
+
+1. Open OpenCode once on that machine to refresh the table. Add the model to `pricing-overrides.json` only if the
+   refreshed table still does not carry it: an override that merely duplicates the table can only drift from it.
+2. `harness-usage reprice --unpriced-only` (after `--dry-run`) to value the events stored at `$0`.
+
+The agent fetching the catalogue itself would remove this dependency; that is not implemented.
 
 ---
 
