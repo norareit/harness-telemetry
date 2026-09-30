@@ -6,7 +6,10 @@ real tree, a missing `~/projects/agent-kit/changes/9999-…` resolves to `~/proj
 (`/Users/stef/...`) and a missing `/tmp` dir are returned unchanged. Repaired on desktop the same day, with the timer
 stopped and a backup taken: the `reroot-project.mjs` dry run listed exactly the one pair (2 events), `--apply`, then
 `sync` exited 0 with the backlog clear, and `doctor` shows "projects are repo roots" and "cost reproducible from stored
-rates" both ok.
+rates" both ok. Repaired on the Mac the same day, the same way: the dry run listed one pair,
+`janestreet/pentupfrustration/learn-path-calc` → `janestreet/pentupfrustration` (5 events; the directory went away
+when it became a Maven project in `a3129ef`). The target is the split child, not `janestreet`, so `.harness-split` held.
+After `--apply`, `sync` exited 0 and `doctor` passed 20/20.
 
 ## What was broken
 
