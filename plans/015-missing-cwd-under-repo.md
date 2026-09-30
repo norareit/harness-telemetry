@@ -3,8 +3,10 @@
 Type: **bug**
 Status: **implemented** (2026-09-30). `npm test` is green at 131 (three new cases in `project.test.js`). On desktop's
 real tree, a missing `~/projects/agent-kit/changes/9999-…` resolves to `~/projects/agent-kit`, while a Mac path
-(`/Users/stef/...`) and a missing `/tmp` dir are returned unchanged. The repair of the 2 existing events on desktop is
-still to be done.
+(`/Users/stef/...`) and a missing `/tmp` dir are returned unchanged. Repaired on desktop the same day, with the timer
+stopped and a backup taken: the `reroot-project.mjs` dry run listed exactly the one pair (2 events), `--apply`, then
+`sync` exited 0 with the backlog clear, and `doctor` shows "projects are repo roots" and "cost reproducible from stored
+rates" both ok.
 
 ## What was broken
 
