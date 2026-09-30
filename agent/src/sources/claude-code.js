@@ -29,7 +29,7 @@ export async function* extractClaudeCode({ store, config, full = false }) {
   // plans/008: file each event under the repository root of its cwd. Applied
   // here, where `config` is in hand, rather than inside parseRecord (which is
   // pure and shared with doctor). projectRootOf is a no-op when the path has no
-  // .git ancestor or no longer exists, so pre-008 behaviour is the fallback.
+  // .git ancestor, so pre-008 behaviour is the fallback.
   const detectRoot = config.project?.detectRoot !== false;
   for (const path of await listTranscripts(root)) {
     for await (const ev of readFileIncremental({ store, path, full })) {

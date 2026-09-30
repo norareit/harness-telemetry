@@ -63,12 +63,30 @@ test("no .git anywhere above: the path is returned unchanged", () => {
   assert.equal(projectRootOf(inner, { home: t.home }), inner);
 });
 
-test("a path that does not exist is returned unchanged, even under a repo", () => {
+// plans/015: a cwd that exists only on another branch is gone while that branch
+// is not checked out, and must still be filed under its repo.
+test("a path that does not exist resolves to the existing repo above it", () => {
   const t = tree();
   t.mk("repo");
   t.gitDir("repo");
-  const gone = join(t.dir, "repo", "was", "here");
+  const gone = join(t.dir, "repo", "changes", "0010-init-command");
+  assert.equal(projectRootOf(gone, { home: t.home }), join(t.dir, "repo"));
+});
+
+test("a path that does not exist, with no .git above it, is returned unchanged", () => {
+  const t = tree();
+  t.mk("plain");
+  const gone = join(t.dir, "plain", "was", "here");
   assert.equal(projectRootOf(gone, { home: t.home }), gone);
+});
+
+test("a path that does not exist inside a split child resolves to that child", () => {
+  const t = tree();
+  t.mk("repo", "janestreet");
+  t.gitDir("repo");
+  t.split("repo", "janestreet");
+  const gone = join(t.dir, "repo", "janestreet", "archmadness", "src");
+  assert.equal(projectRootOf(gone, { home: t.home }), join(t.dir, "repo", "janestreet", "archmadness"));
 });
 
 test("a .git at or above $HOME is ignored (a dotfiles repo must not swallow ~)", () => {

@@ -7,8 +7,8 @@
 //
 // It must run on the device the events came from: projectRootOf walks THAT
 // machine's filesystem for `.git`, and a path from another machine (or a deleted
-// scratch dir) resolves to itself and is left alone — which is correct, it can
-// only be repaired where the files still are.
+// scratch dir) with no repo above it resolves to itself and is left alone —
+// which is correct, it can only be repaired where the files still are.
 //
 // Mechanics (and why this is not a `backfill`) are shared with retag-device.mjs
 // in scripts/lib/rewrite-events.mjs.

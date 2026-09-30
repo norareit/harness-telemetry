@@ -8,9 +8,11 @@
 //
 // Filesystem only, no `git` binary: the nearest ancestor holding a `.git` (a
 // directory OR a file — worktrees and submodules carry a `.git` file and are
-// checkouts in their own right). When there is none, or the path is gone, or the
-// only `.git` sits at/above $HOME, the working directory is kept unchanged —
-// that is both the asked-for fallback and the pre-plan-008 behaviour.
+// checkouts in their own right). When there is none, or the only `.git` sits
+// at/above $HOME, the working directory is kept unchanged — that is both the
+// asked-for fallback and the pre-plan-008 behaviour. A path that is gone (another
+// branch checked out, a deleted dir) still resolves to an existing repo above it
+// (plans/015); with no `.git` above it, it too is kept unchanged.
 //
 // Split containers (a repo that is one repo for convenience but several projects
 // in the mind — e.g. a `janestreet/` repo holding `archmadness`, `hint-singles`,
@@ -43,33 +45,34 @@ export function projectRootOf(dir, { home = os.homedir(), fs = nodeFs } = {}) {
   if (cache.has(dir)) return cache.get(dir);
 
   let result = dir;
-  if (exists(fs, dir)) {
-    const stop = trimSlash(home);
-    let d = dir;
-    // Walk up to, but never onto, the filesystem root; and never onto $HOME or
-    // above it (a dotfiles repo in ~ would otherwise swallow every project).
-    while (dirname(d) !== d) {
-      if (trimSlash(d) === stop) break;
-      // A repo root ends the walk...
-      if (exists(fs, join(d, ".git"))) {
-        result = d;
-        break;
-      }
-      // ...and so does being the immediate child of a split container. Checked
-      // AFTER .git at the same level, but since the container sits one level
-      // ABOVE its children this is reached first for a child, so a split repo's
-      // sub-projects win over the repo's own `.git`.
-      const parent = dirname(d);
-      if (
-        parent !== d &&
-        trimSlash(parent) !== stop &&
-        exists(fs, join(parent, SPLIT_MARKER))
-      ) {
-        result = d;
-        break;
-      }
-      d = parent;
+  const stop = trimSlash(home);
+  let d = dir;
+  // The walk is lexical, so it also runs for a path that is missing right now
+  // (plans/015): a branch switch can remove the cwd before the sync runs, and a
+  // missing directory can't produce a false `.git` or marker hit.
+  // Walk up to, but never onto, the filesystem root; and never onto $HOME or
+  // above it (a dotfiles repo in ~ would otherwise swallow every project).
+  while (dirname(d) !== d) {
+    if (trimSlash(d) === stop) break;
+    // A repo root ends the walk...
+    if (exists(fs, join(d, ".git"))) {
+      result = d;
+      break;
     }
+    // ...and so does being the immediate child of a split container. Checked
+    // AFTER .git at the same level, but since the container sits one level
+    // ABOVE its children this is reached first for a child, so a split repo's
+    // sub-projects win over the repo's own `.git`.
+    const parent = dirname(d);
+    if (
+      parent !== d &&
+      trimSlash(parent) !== stop &&
+      exists(fs, join(parent, SPLIT_MARKER))
+    ) {
+      result = d;
+      break;
+    }
+    d = parent;
   }
 
   cache.set(dir, result);

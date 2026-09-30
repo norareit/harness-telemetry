@@ -1,7 +1,10 @@
 # Plan 015 — A working directory missing at sync time still resolves to its repository
 
 Type: **bug**
-Status: **planned** (2026-09-30).
+Status: **implemented** (2026-09-30). `npm test` is green at 131 (three new cases in `project.test.js`). On desktop's
+real tree, a missing `~/projects/agent-kit/changes/9999-…` resolves to `~/projects/agent-kit`, while a Mac path
+(`/Users/stef/...`) and a missing `/tmp` dir are returned unchanged. The repair of the 2 existing events on desktop is
+still to be done.
 
 ## What was broken
 

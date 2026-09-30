@@ -464,9 +464,10 @@ cost_usd  billing('api'|'local'|'free')  priced_by('table'|'override'|'none')
 
 `project` is **the repository root** the work belongs to: at extraction each event's working directory is resolved to
 its nearest `.git` ancestor (a directory or a file, so worktrees and submodules count), so subdirectories of one repo no
-longer split into separate "projects" on the dashboard. A working directory with no `.git` above it (or whose path is
-gone) keeps its raw value, and a `.git` at or above `$HOME` is ignored so a dotfiles repo cannot swallow everything into
-`~`. Set `"project": { "detectRoot": false }` in `config.json` to store the raw working directory instead (pre-plan-008
+longer split into separate "projects" on the dashboard. This includes a working directory that is missing at sync time,
+e.g. one that exists only on a branch that is not checked out. A working directory with no `.git` above it keeps its raw
+value, and a `.git` at or above `$HOME` is ignored so a dotfiles repo cannot swallow everything into `~`. Set
+`"project": { "detectRoot": false }` in `config.json` to store the raw working directory instead (pre-plan-008
 behaviour). Events recorded before this was introduced keep their old subdirectory value until repaired in place with
 `node agent/scripts/reroot-project.mjs` (run per device — it walks that machine's filesystem; `doctor`'s "projects are
 repo roots" check flags what still needs it).
