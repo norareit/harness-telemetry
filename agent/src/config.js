@@ -56,7 +56,9 @@ const DEFAULTS = {
   scenarios: [
     "openrouter/anthropic/claude-opus-5.5",
     "openrouter/anthropic/claude-opus-5",
+    "openrouter/anthropic/claude-sonnet-5.5",
     "openrouter/anthropic/claude-sonnet-5",
+    "openrouter/openai/gpt-6.1-sol",
     "openrouter/openai/gpt-6-sol",
     "openrouter/openai/gpt-6-luna",
     "openrouter/openai/gpt-6-astra",
