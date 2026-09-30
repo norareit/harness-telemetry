@@ -464,8 +464,8 @@ function stalenessCheck(ctx, key, absentHint) {
 // value that resolves to a DIFFERENT root on this
 // machine is a subdirectory that predates the fix — repairable with
 // reroot-project.mjs. Skipped when detectRoot is off (raw cwds are then
-// intentional). A project whose path is gone here resolves to itself and is not
-// flagged: it can only be repaired on the device that still has the files.
+// intentional). A missing path under a detectable repo is flagged too; without
+// a detectable repo or split marker above it, the path stays unchanged.
 function checkProjectsAreRoots(ctx) {
   if (ctx.config.project?.detectRoot === false) return null;
   let subdirs = 0;
