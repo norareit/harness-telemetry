@@ -1,4 +1,4 @@
-// project.test.js — projectRootOf, the repository-root resolver (plans/008), and isProjectRoot (plans/014).
+// project.test.js — projectRootOf, the repository-root resolver (plans/008, 017), and isProjectRoot (plans/014).
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -31,6 +31,15 @@ function tree() {
     },
     gitDir: (...p) => mkdirSync(join(dir, ...p, ".git"), { recursive: true }),
     gitFile: (...p) => writeFileSync(join(dir, ...p, ".git"), "gitdir: /elsewhere\n"),
+    // A linked worktree of `main` at `wt` (both arrays of path parts), as
+    // `git worktree add` lays it out. `gitdir` overrides the pointer's spelling.
+    worktree: (main, wt, { name = "wt", gitdir } = {}) => {
+      const own = join(dir, ...main, ".git", "worktrees", name);
+      mkdirSync(own, { recursive: true });
+      writeFileSync(join(own, "commondir"), "../..\n");
+      mkdirSync(join(dir, ...wt), { recursive: true });
+      writeFileSync(join(dir, ...wt, ".git"), `gitdir: ${gitdir ?? own}\n`);
+    },
     split: (...p) => writeFileSync(join(dir, ...p, SPLIT_MARKER), "# split\n"),
   };
 }
@@ -42,11 +51,79 @@ test("a .git directory: an inner working dir resolves to the repo root", () => {
   assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "repo"));
 });
 
-test("a .git FILE (worktree/submodule shape) counts as a root", () => {
+test("a .git FILE whose git dir is gone counts as a root", () => {
   const t = tree();
   const inner = t.mk("wt", "src");
   t.gitFile("wt");
   assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "wt"));
+});
+
+// plans/017: a linked worktree is a second checkout of the same repository.
+test("a linked worktree resolves to its main checkout, from its root and from a subdirectory", () => {
+  const t = tree();
+  t.worktree(["repo"], ["repo-hotfix"]);
+  const inner = t.mk("repo-hotfix", "src", "deep");
+  assert.equal(projectRootOf(join(t.dir, "repo-hotfix"), { home: t.home }), join(t.dir, "repo"));
+  assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "repo"));
+});
+
+test("a linked worktree nested inside its main checkout resolves to the main checkout", () => {
+  const t = tree();
+  const wt = ["repo", ".claude", "worktrees", "agent-a9ad065d34463ec7c"];
+  t.worktree(["repo"], wt, { name: "agent-a9ad065d34463ec7c" });
+  assert.equal(projectRootOf(t.mk(...wt, "changes"), { home: t.home }), join(t.dir, "repo"));
+});
+
+test("a linked worktree's relative gitdir is resolved against the worktree root", () => {
+  const t = tree();
+  t.worktree(["repo"], ["side", "wt"], { gitdir: "../../repo/.git/worktrees/wt" });
+  assert.equal(projectRootOf(t.mk("side", "wt", "src"), { home: t.home }), join(t.dir, "repo"));
+});
+
+test("a linked worktree of a split container: a child resolves to the main checkout's child", () => {
+  const t = tree();
+  t.worktree(["repo"], ["wt"]);
+  // The marker is committed, so both checkouts have it.
+  t.mk("repo", "janestreet");
+  t.split("repo", "janestreet");
+  const inner = t.mk("wt", "janestreet", "archmadness", "src");
+  t.split("wt", "janestreet");
+  assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "repo", "janestreet", "archmadness"));
+});
+
+test("a submodule (a git dir without commondir) stays its own project", () => {
+  const t = tree();
+  t.gitDir("super");
+  const own = t.mk("super", ".git", "modules", "sub");
+  const inner = t.mk("super", "sub", "src");
+  writeFileSync(join(t.dir, "super", "sub", ".git"), `gitdir: ${own}\n`);
+  assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "super", "sub"));
+});
+
+test("a linked worktree of a bare repository stays its own project", () => {
+  const t = tree();
+  const own = t.mk("repo.git", "worktrees", "wt");
+  writeFileSync(join(own, "commondir"), "../..\n");
+  const inner = t.mk("wt", "src");
+  writeFileSync(join(t.dir, "wt", ".git"), `gitdir: ${own}\n`);
+  assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "wt"));
+});
+
+test("a linked worktree whose main checkout is $HOME stays its own project", () => {
+  const t = tree();
+  const own = join(t.home, ".git", "worktrees", "wt");
+  mkdirSync(own, { recursive: true });
+  writeFileSync(join(own, "commondir"), "../..\n");
+  const inner = t.mk("wt", "src");
+  writeFileSync(join(t.dir, "wt", ".git"), `gitdir: ${own}\n`);
+  assert.equal(projectRootOf(inner, { home: t.home }), join(t.dir, "wt"));
+});
+
+test("isProjectRoot: a linked worktree is not a root, its main checkout is", () => {
+  const t = tree();
+  t.worktree(["repo"], ["wt"]);
+  assert.equal(isProjectRoot(join(t.dir, "wt"), { home: t.home }), false);
+  assert.equal(isProjectRoot(join(t.dir, "repo"), { home: t.home }), true);
 });
 
 test("nested repositories: the nearest .git wins", () => {

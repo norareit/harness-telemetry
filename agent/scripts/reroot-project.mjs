@@ -3,7 +3,9 @@
 // Before plan 008 `project` was the raw working directory, so subdirectories of
 // one repo were split apart on the dashboard (`harness-telemetry`, `agent`,
 // `server`, `src`). New events are filed correctly by the extractors; THIS
-// rewrites the ones already stored, in place, so they join their repo.
+// rewrites the ones already stored, in place, so they join their repo. The same
+// goes for events stored under a linked git worktree (plans/017): they join the
+// main checkout.
 //
 // It must run on the device the events came from: projectRootOf walks THAT
 // machine's filesystem for `.git`, and a path from another machine (or a deleted

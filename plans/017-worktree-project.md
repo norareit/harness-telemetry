@@ -1,8 +1,11 @@
 # Plan 017 — A linked git worktree is filed under its main repository
 
 Type: **bug**
-Status: **planned** (2026-10-04). Not implemented. The only thing verified so far is the diagnosis below and the
-`reroot-project.mjs` dry run on desktop (42 events, one pair), which wrote nothing.
+Status: **implemented** (2026-10-04). `npm test` is green at 139 (eight new cases in `project.test.js`, one renamed).
+Checked against real git in a scratch directory: a worktree nested under `main/.claude/worktrees/` and a sibling
+worktree both resolve to `main`, and a submodule (`gitdir: ../.git/modules/sub`) stays its own project. The existing
+rows are **not repaired yet**: the `reroot-project.mjs` dry run on desktop still lists the one pair (42 events) and
+wrote nothing. The Mac has not been checked.
 
 ## What was broken
 
