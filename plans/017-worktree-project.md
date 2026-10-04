@@ -3,9 +3,11 @@
 Type: **bug**
 Status: **implemented** (2026-10-04). `npm test` is green at 139 (eight new cases in `project.test.js`, one renamed).
 Checked against real git in a scratch directory: a worktree nested under `main/.claude/worktrees/` and a sibling
-worktree both resolve to `main`, and a submodule (`gitdir: ../.git/modules/sub`) stays its own project. The existing
-rows are **not repaired yet**: the `reroot-project.mjs` dry run on desktop still lists the one pair (42 events) and
-wrote nothing. The Mac has not been checked.
+worktree both resolve to `main`, and a submodule (`gitdir: ../.git/modules/sub`) stays its own project. Repaired on
+desktop the same day, with the timer stopped and a backup taken: the `reroot-project.mjs` dry run listed exactly the
+one pair (42 events), `--apply`, then `sync` exited 0 with the backlog clear (51 events shipped: the 42 plus 9 new), a
+re-run found nothing to reroot, and `doctor` passed 20/20 with "projects are repo roots" ok. The Mac has not been
+checked.
 
 ## What was broken
 
