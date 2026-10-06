@@ -41,9 +41,13 @@ export function homeInputPath(harness, home) {
  * without `*` is returned whether or not it exists, so `doctor` can report it
  * missing; an entry with `*` yields only directories that are there.
  *
- * @returns {{home: string, project: string}[]} sorted by path, each path once
- *   (the first entry that names it wins). `project` is the entry's expanded
- *   override, or the home directory's own name.
+ * A directory named twice — by two entries, or by an entry and a symlink to it
+ * in another — is returned once, as the FIRST entry in the config names it.
+ * That precedence is settled here, in config order, before the sort: sorting
+ * first would let an alias lose to its target merely because of its spelling.
+ *
+ * @returns {{home: string, project: string}[]} sorted by path. `project` is
+ *   the entry's expanded override, or the home directory's own name.
  */
 export function expandHomes(entries, { fs = nodeFs } = {}) {
   const out = [];
@@ -51,8 +55,9 @@ export function expandHomes(entries, { fs = nodeFs } = {}) {
   for (const entry of entries || []) {
     if (!entry || typeof entry.home !== "string" || !entry.home) continue;
     for (const home of expandPattern(entry.home, fs)) {
-      if (seen.has(home)) continue;
-      seen.add(home);
+      const real = realOrSame(fs, home);
+      if (seen.has(real)) continue;
+      seen.add(real);
       out.push({ home, project: entry.project ? expandHome(entry.project) : basename(home) });
     }
   }
@@ -64,10 +69,16 @@ export function expandHomes(entries, { fs = nodeFs } = {}) {
  * the repository-root rule applies), then one per home.
  *
  * An input whose real path equals that of an earlier one is left out: the
- * device's own wins over a home that resolves to it, and the first wins among
- * homes. Otherwise an OpenCode database reached twice would be read again under
- * a second watermark key and its events re-filed under the home's name. A path
- * that does not exist is compared as written.
+ * device's own wins over a home that resolves to it. Otherwise an OpenCode
+ * database reached twice would be read again under a second watermark key and
+ * its events re-filed under the home's name. A path that does not exist is
+ * compared as written.
+ *
+ * A home's input that is there but not really inside its home is left out
+ * BEFORE that comparison, so it can never claim a real path. Were it compared
+ * first, home `a` linking its database to home `b`'s would take `b`'s place as
+ * the duplicate and then be refused by the extractor — and neither would be
+ * read: a sandbox could switch off another project's telemetry.
  *
  * @returns {{path: string, project: string|null, home: string|null}[]}
  */
@@ -80,6 +91,9 @@ export function inputsFor(harness, config, { fs = nodeFs } = {}) {
 
   const seen = new Set();
   return inputs.filter((input) => {
+    if (input.home && present(fs, input.path) && !insideHome(input.home, input.path, { fs })) {
+      return false;
+    }
     const real = realOrSame(fs, input.path);
     if (seen.has(real)) return false;
     seen.add(real);
@@ -127,6 +141,35 @@ export function databaseInHome(home, dbPath, { fs = nodeFs } = {}) {
     const side = dbPath + suffix;
     if (present(fs, side) && !fileInHome(home, side, { fs })) return false;
   }
+  return true;
+}
+
+const TOKEN_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "reasoning_tokens",
+  "cache_read_tokens",
+  "cache_write_5m_tokens",
+  "cache_write_1h_tokens",
+];
+const TEXT_OR_NULL = ["provider", "model", "agent", "git_branch"];
+
+/**
+ * Whether an event extracted from a home has the shape the rest of the
+ * pipeline assumes: text ids, a timestamp that parses, text-or-null labels and
+ * token counts that are non-negative whole numbers. The parsers were written
+ * for files the harnesses themselves produce; a home's file may hold anything,
+ * and one record the pricing or the store chokes on would abort the whole
+ * sync, the device's own events included. Such an event is dropped instead.
+ */
+export function wellFormed(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  if (typeof ev.session_id !== "string" || !ev.session_id) return false;
+  if (typeof ev.message_id !== "string" || !ev.message_id) return false;
+  if (typeof ev.ts !== "string" && typeof ev.ts !== "number") return false;
+  if (Number.isNaN(new Date(ev.ts).getTime())) return false;
+  for (const f of TEXT_OR_NULL) if (ev[f] != null && typeof ev[f] !== "string") return false;
+  for (const f of TOKEN_FIELDS) if (!Number.isSafeInteger(ev[f]) || ev[f] < 0) return false;
   return true;
 }
 

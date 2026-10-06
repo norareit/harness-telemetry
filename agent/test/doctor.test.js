@@ -248,7 +248,13 @@ function homeFixture(t) {
   mkdirSync(join(dir, "outside"));
   writeFileSync(join(slug, "s1.jsonl"), "{}\n");
   const db = new DatabaseSync(join(ocDir, "opencode.db"));
-  db.exec("CREATE TABLE message (id TEXT); INSERT INTO message VALUES ('m1'), ('m2');");
+  db.exec(`
+    CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+    CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, workspace_id TEXT);
+    CREATE TABLE workspace (id TEXT PRIMARY KEY, branch TEXT, directory TEXT);
+    INSERT INTO session (id, directory) VALUES ('s1', '/work');
+    INSERT INTO message VALUES ('m1', 's1', 1, 1, '{}'), ('m2', 's1', 2, 2, '{}');
+  `);
   db.close();
   const ctx = (homes) => ({ config: { homes }, ccEnabled: true, ocEnabled: true });
   return { dir, home, slug, ocDir, ctx };
@@ -277,6 +283,19 @@ test("check 'extra homes': a missing entry fails, a wildcard that matches nothin
 test("check 'extra homes': a database that cannot be read fails", async (t) => {
   const f = homeFixture(t);
   writeFileSync(join(f.ocDir, "opencode.db"), "not a database, but long enough to be read as one".repeat(4));
+  const r = await check("extra homes")(f.ctx([{ home: f.home }]));
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /cannot read .*opencode\.db/);
+});
+
+test("check 'extra homes': a database the extractor's query cannot read fails (review C2)", async (t) => {
+  const f = homeFixture(t);
+  // A real SQLite database with a `message` table, but not OpenCode's schema: a
+  // bare count over `message` would pass it while extraction reads nothing.
+  rmSync(join(f.ocDir, "opencode.db"));
+  const db = new DatabaseSync(join(f.ocDir, "opencode.db"));
+  db.exec("CREATE TABLE message (id TEXT); INSERT INTO message VALUES ('m1');");
+  db.close();
   const r = await check("extra homes")(f.ctx([{ home: f.home }]));
   assert.equal(r.ok, false);
   assert.match(r.detail, /cannot read .*opencode\.db/);

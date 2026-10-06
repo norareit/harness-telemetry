@@ -1,7 +1,9 @@
 # Plan 018 — Extra harness homes
 
 Type: **task**
-Status: **implemented** (2026-10-06). Verified: `npm test` (170 pass), and on desktop against a copy of the
+Status: **implemented** (2026-10-06), review findings S1 and C1 to C3 fixed (see the last section). Verified:
+`npm test` (182 pass), the reviewer's failing sync (a `null` line and an outward symlink in a home) now exits 0
+with the other events stored, and on desktop against a copy of the
 `norareit-agent_agent-home` volume with a scratch config and data dir: `sync --no-ship` extracted 153 Claude Code
 and 73 OpenCode events, all under one project; a second run extracted 0; `doctor` passed "extra homes" (1 home, 5
 transcripts, 80 OpenCode messages) and "projects are repo roots". Not verified: the device's real config with a
@@ -160,6 +162,29 @@ with the rule above a sandbox cannot make the agent read those of other projects
 5. Not verified by this plan: reading an OpenCode database on the Mac while a container writes it through Docker
    Desktop's file sharing. A read-only SQLite reader needs the database's shared memory file, and that layer is
    where it may fail. Check it on the Mac before relying on it there.
+
+## Review findings (2026-10-06)
+
+A review of the implementation found four faults. All are fixed, each with tests.
+
+- **S1, a rejected symlink suppressed another home.** `inputsFor` compared real paths before anything checked that
+  an input is inside its home. Home `a` linking its database (or projects root) to home `b`'s took `b`'s place as
+  the duplicate and was then refused by the extractor, so neither was read: a sandbox could switch off another
+  project's telemetry. Fix: `inputsFor` leaves out a home's input that is there but not inside its home, before the
+  comparison. It can no longer claim a real path.
+- **C1, one unsupported record aborted the whole sync.** The plan assumed the parsers ignore what they do not
+  understand. They did not: a transcript line `null`, or an OpenCode message whose data is `null`, threw, and the
+  exception rolled back the source's transaction, the device's own events included, on every run. Fix, in three
+  parts. `parseRecord` and `toEvent` return null for JSON that is not an object, for every input. An event from a
+  home is dropped unless `wellFormed` (`homes.js`): text ids, a timestamp that parses, text-or-null labels,
+  token counts that are non-negative whole numbers. A home's transcript that cannot be read (no permission, gone)
+  is given up on for that run, and a home's OpenCode row with a non-integer `time_updated` is skipped.
+- **C2, doctor passed a database the extractor cannot read.** "extra homes" counted rows of `message` only. Fix:
+  `readableMessages` (`sources/opencode.js`) counts over the extractor's own query, which both now share as
+  `MESSAGE_QUERY`, so a missing table or column fails the check.
+- **C3, sorting decided which entry won.** `expandHomes` sorted before `inputsFor` removed aliases, so of a symlink
+  and its target the one that sorts first won, not the one configured first. Fix: `expandHomes` removes duplicates
+  by real path in config order, and sorts what is left.
 
 ## The backlog in existing volumes
 

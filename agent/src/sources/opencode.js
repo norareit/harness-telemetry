@@ -25,11 +25,27 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { expandHome } from "../config.js";
-import { databaseInHome, inputsFor } from "../homes.js";
+import { databaseInHome, inputsFor, wellFormed } from "../homes.js";
 import { projectRootOf } from "../project.js";
 
 const HARNESS = "opencode";
 const WATERMARK_KEY = "watermark:opencode:time_updated";
+
+// What extraction reads. Shared with `readableMessages`, so that doctor judges
+// a database by the very query the extractor will run against it.
+const MESSAGE_QUERY = `SELECT
+     m.id           AS message_id,
+     m.session_id   AS session_id,
+     m.time_updated AS time_updated,
+     m.data         AS data,
+     s.directory    AS session_dir,
+     s.parent_id    AS parent_id,
+     w.branch       AS branch
+   FROM message m
+   JOIN session s ON s.id = m.session_id
+   LEFT JOIN workspace w ON w.id = s.workspace_id
+   WHERE m.time_updated >= ?
+   ORDER BY m.time_updated ASC`;
 
 export async function* extractOpenCode({ store, config, full = false }) {
   // plans/018: the device's own database, then one per extra home.
@@ -60,23 +76,7 @@ async function* extractDatabase({ store, config, full, input }) {
 
     let rows;
     try {
-      rows = db
-        .prepare(
-          `SELECT
-             m.id           AS message_id,
-             m.session_id   AS session_id,
-             m.time_updated AS time_updated,
-             m.data         AS data,
-             s.directory    AS session_dir,
-             s.parent_id    AS parent_id,
-             w.branch       AS branch
-           FROM message m
-           JOIN session s ON s.id = m.session_id
-           LEFT JOIN workspace w ON w.id = s.workspace_id
-           WHERE m.time_updated >= ?
-           ORDER BY m.time_updated ASC`,
-        )
-        .all(since);
+      rows = db.prepare(MESSAGE_QUERY).all(since);
     } catch (err) {
       // A home's database that is not an OpenCode database (or not a database
       // at all) is skipped, and the other inputs are still read. The device's
@@ -90,13 +90,20 @@ async function* extractDatabase({ store, config, full, input }) {
     const detectRoot = config.project?.detectRoot !== false;
     let maxWatermark = since;
     for (const row of rows) {
+      // SQLite columns are untyped: a home's row may hold anything here.
+      if (input.home && !Number.isSafeInteger(row.time_updated)) continue;
       maxWatermark = Math.max(maxWatermark, row.time_updated);
       const ev = toEvent(row);
-      if (ev) {
-        if (input.home) ev.project = input.project;
-        else if (detectRoot) ev.project = projectRootOf(ev.project);
-        yield ev;
+      if (!ev) continue;
+      if (input.home) {
+        // Untrusted content (plans/018): drop what is not well formed rather
+        // than let one row abort the sync of everything else.
+        if (!wellFormed(ev)) continue;
+        ev.project = input.project;
+      } else if (detectRoot) {
+        ev.project = projectRootOf(ev.project);
       }
+      yield ev;
     }
 
     if (maxWatermark > since) store.setKV(watermarkKey, maxWatermark);
@@ -112,7 +119,9 @@ function toEvent(row) {
   } catch {
     return null;
   }
-  if (d.role !== "assistant" || !d.tokens) return null;
+  // Valid JSON need not be a message: `null`, a number, a string.
+  if (!d || typeof d !== "object") return null;
+  if (d.role !== "assistant" || !d.tokens || typeof d.tokens !== "object") return null;
 
   const t = d.tokens;
   const cache = t.cache || {};
@@ -139,6 +148,21 @@ function toEvent(row) {
     cache_write_5m_tokens: cache.write ?? 0, // OpenCode has no TTL split
     cache_write_1h_tokens: 0,
   };
+}
+
+/**
+ * How many messages the extractor's own query returns from a database, for
+ * `doctor`'s "extra homes" check. Throws when the database cannot be opened or
+ * lacks a table or column extraction needs — a count over `message` alone
+ * would call such a database healthy while extraction read nothing from it.
+ */
+export function readableMessages(dbPath) {
+  const db = new DatabaseSync(expandHome(dbPath), { readOnly: true });
+  try {
+    return db.prepare(`SELECT COUNT(*) AS c FROM (${MESSAGE_QUERY})`).get(0).c;
+  } finally {
+    db.close();
+  }
 }
 
 /**

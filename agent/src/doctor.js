@@ -19,7 +19,7 @@ import { loadConfig, expandHome, CONFIG_PATH, DATA_DIR } from "./config.js";
 import { LocalStore } from "./local-store.js";
 import { loadPricing } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
-import { reconcile, listModels } from "./sources/opencode.js";
+import { reconcile, listModels, readableMessages } from "./sources/opencode.js";
 import { parseRecord, providerOf, listTranscripts } from "./sources/claude-code.js";
 import { projectRootOf } from "./project.js";
 import { databaseInHome, expandHomes, fileInHome, homeInputPath } from "./homes.js";
@@ -548,12 +548,8 @@ async function checkExtraHomes(ctx) {
         problems.push(`skipped, not a file inside its home: ${dbPath}`);
       } else {
         try {
-          const db = new DatabaseSync(dbPath, { readOnly: true });
-          try {
-            parts.push(`${db.prepare("SELECT COUNT(*) c FROM message").get().c} opencode messages`);
-          } finally {
-            db.close();
-          }
+          // The extractor's own query, so a schema it cannot read fails here.
+          parts.push(`${readableMessages(dbPath)} opencode messages`);
         } catch (err) {
           problems.push(`cannot read ${dbPath}: ${err.message}`);
         }

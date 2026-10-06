@@ -20,7 +20,7 @@ import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { fileInHome, inputsFor } from "../homes.js";
+import { fileInHome, inputsFor, wellFormed } from "../homes.js";
 import { projectRootOf } from "../project.js";
 
 const HARNESS = "claude-code";
@@ -34,14 +34,33 @@ export async function* extractClaudeCode({ store, config, full = false }) {
   // plans/018: the device's own projects root, then one per extra home.
   for (const input of inputsFor(HARNESS, config)) {
     for (const path of await transcriptsOf(input)) {
+      if (input.home) {
+        yield* readHomeTranscript({ store, path, full, project: input.project });
+        continue;
+      }
       for await (const ev of readFileIncremental({ store, path, full })) {
-        // An event from a home is filed under the home's project: its cwd is a
-        // path inside a container and means nothing on this device.
-        if (input.home) ev.project = input.project;
-        else if (detectRoot) ev.project = projectRootOf(ev.project);
+        if (detectRoot) ev.project = projectRootOf(ev.project);
         yield ev;
       }
     }
+  }
+}
+
+// One transcript of an extra home (plans/018). Its events are filed under the
+// home's project: the cwd is a path inside a container and means nothing on
+// this device. The content is untrusted, so an event that is not well formed
+// is dropped, and a file that cannot be read (no permission, gone since it was
+// listed) is given up on — neither may abort the sync of everything else. The
+// cursor is only stored after a complete read, so such a file is retried.
+async function* readHomeTranscript({ store, path, full, project }) {
+  try {
+    for await (const ev of readFileIncremental({ store, path, full })) {
+      if (!wellFormed(ev)) continue;
+      ev.project = project;
+      yield ev;
+    }
+  } catch {
+    // skipped; doctor's "extra homes" check reports what it cannot read
   }
 }
 
@@ -158,10 +177,12 @@ export function parseRecord(line) {
   } catch {
     return null;
   }
-  if (rec.type !== "assistant") return null;
+  // Valid JSON need not be a record: `null`, a number, a string.
+  if (!rec || typeof rec !== "object" || rec.type !== "assistant") return null;
   const msg = rec.message;
-  if (!msg || !msg.usage) return null;
+  if (!msg || typeof msg !== "object" || !msg.usage || typeof msg.usage !== "object") return null;
   if (msg.model === "<synthetic>") return null;
+  if (msg.model != null && typeof msg.model !== "string") return null;
 
   const dedupeKey = rec.requestId || rec.uuid;
   if (!dedupeKey) return null;

@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { databaseInHome, expandHomes, fileInHome, inputsFor, insideHome } from "../src/homes.js";
+import { databaseInHome, expandHomes, fileInHome, inputsFor, insideHome, wellFormed } from "../src/homes.js";
+import { event } from "./helpers.js";
 
 const TMP = [];
 // realpath: tmpdir() may itself be a symlink (macOS), and paths are compared.
@@ -82,6 +83,19 @@ test("expandHomes: a directory named twice is returned once, with the first entr
   ]);
 });
 
+test("expandHomes: an alias configured first wins over its target, whatever their spelling (review C3)", () => {
+  const dir = mkTmp();
+  const real = mk(dir, "a-real");
+  const alias = join(dir, "z-alias");
+  symlinkSync(real, alias);
+  assert.deepEqual(expandHomes([{ home: alias, project: "first" }, { home: real, project: "second" }]), [
+    { home: alias, project: "first" },
+  ]);
+  assert.deepEqual(expandHomes([{ home: real, project: "first" }, { home: alias, project: "second" }]), [
+    { home: real, project: "first" },
+  ]);
+});
+
 test("expandHomes: malformed entries are ignored", () => {
   assert.deepEqual(expandHomes([null, {}, { home: 3 }, "x"]), []);
 });
@@ -128,6 +142,58 @@ test("inputsFor: an input that resolves to an earlier one through a symlink is d
   symlinkSync(ownDb, join(mk(home, ".local", "share", "opencode"), "opencode.db"));
   const config = { sources: { opencode: { db: ownDb } }, homes: [{ home }] };
   assert.deepEqual(inputsFor("opencode", config).map((i) => i.home), [null]);
+});
+
+// review S1: home `a` sorts first and points its inputs at home `b`'s. It must
+// not take b's place in the list, or neither would be read.
+test("inputsFor: a home whose input links into another home is left out, and the other is kept", () => {
+  const dir = mkTmp();
+  const a = mk(dir, "homes", "a");
+  const b = mk(dir, "homes", "b");
+  const bRoot = mk(b, ".claude", "projects");
+  const bDb = join(mk(b, ".local", "share", "opencode"), "opencode.db");
+  writeFileSync(bDb, "");
+  mk(a, ".claude");
+  symlinkSync(bRoot, join(a, ".claude", "projects"));
+  symlinkSync(bDb, join(mk(a, ".local", "share", "opencode"), "opencode.db"));
+  const config = {
+    sources: { "claude-code": { root: join(dir, "cc") }, opencode: { db: join(dir, "oc.db") } },
+    homes: [{ home: join(dir, "homes", "*") }],
+  };
+  assert.deepEqual(inputsFor("claude-code", config).map((i) => i.home), [null, b]);
+  assert.deepEqual(inputsFor("opencode", config).map((i) => i.home), [null, b]);
+});
+
+// --- wellFormed ------------------------------------------------------------
+
+test("wellFormed: a canonical event is, with an ISO or an epoch-ms timestamp", () => {
+  assert.equal(wellFormed(event()), true);
+  assert.equal(wellFormed(event({ ts: 1725184800000, agent: "build", git_branch: "main" })), true);
+});
+
+test("wellFormed: wrong shapes are not", () => {
+  for (const over of [
+    { session_id: null },
+    { session_id: 7 },
+    { message_id: "" },
+    { message_id: { a: 1 } },
+    { ts: null },
+    { ts: "not a date" },
+    { ts: {} },
+    { model: 5 },
+    { provider: [] },
+    { agent: {} },
+    { git_branch: 1 },
+    { input_tokens: "12" },
+    { output_tokens: -1 },
+    { reasoning_tokens: 1.5 },
+    { cache_read_tokens: null },
+    { cache_write_5m_tokens: Infinity },
+    { cache_write_1h_tokens: {} },
+  ]) {
+    assert.equal(wellFormed(event(over)), false, JSON.stringify(over));
+  }
+  assert.equal(wellFormed(null), false);
 });
 
 // --- insideHome / fileInHome / databaseInHome ------------------------------

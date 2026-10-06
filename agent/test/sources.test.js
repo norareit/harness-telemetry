@@ -2,7 +2,9 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync, renameSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync, renameSync, symlinkSync, chmodSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -426,4 +428,104 @@ test("OC: a home's file that is not an OpenCode database is skipped, the others 
   writeFileSync(f.homeDb, "not a database, but long enough to be read as one".repeat(4));
   const events = await collect(_oc({ store: ocStore(), config: f.config, full: true }));
   assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new"]);
+});
+
+// --- review of plans/018: one home must not stop the others ----------------
+
+// S1: `a` sorts before `norareit` and links its projects root to norareit's.
+test("CC: a home that links its projects root to another home's does not suppress that home", async () => {
+  const s = homeScratch();
+  const a = join(s.dir, "homes", "a");
+  mkdirSync(join(a, ".claude"), { recursive: true });
+  symlinkSync(join(s.home, ".claude", "projects"), join(a, ".claude", "projects"));
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => [e.message_id, e.project]), [["h1", "norareit"]]);
+});
+
+test("OC: a home that links its database to another home's does not suppress that home", async () => {
+  const f = ocHomes();
+  renameSync(f.inHome.path, f.homeDb);
+  const a = join(f.dir, "homes", "a");
+  mkdirSync(join(a, ".local", "share", "opencode"), { recursive: true });
+  symlinkSync(f.homeDb, join(a, ".local", "share", "opencode", "opencode.db"));
+  const config = { ...f.config, homes: [{ home: join(f.dir, "homes", "*") }] };
+  const events = await collect(_oc({ store: ocStore(), config, full: true }));
+  assert.deepEqual(
+    events.map((e) => [e.message_id, e.project]),
+    [["own-old", "/proj"], ["own-new", "/proj"], ["home-old", "norareit"], ["home-new", "norareit"]],
+  );
+});
+
+// C1: valid JSON that is not a record, and records of the wrong shape.
+const JUNK_LINES = [
+  "null", "7", '"text"', "[]", "{}",
+  JSON.stringify({ type: "assistant", message: null }),
+  JSON.stringify({ type: "assistant", requestId: "j1", message: { usage: "lots" } }),
+  JSON.stringify(assistant({ requestId: "j2", message: { model: 5 } })),
+  JSON.stringify(assistant({ requestId: "j3", sessionId: { a: 1 } })),
+  JSON.stringify(assistant({ requestId: "j4", timestamp: "never" })),
+  JSON.stringify(assistant({ requestId: "j5", message: { usage: { input_tokens: "many", output_tokens: 1 } } })),
+  JSON.stringify(assistant({ requestId: "j6", message: { usage: { input_tokens: -5, output_tokens: 1 } } })),
+  JSON.stringify(assistant({ requestId: "j7", gitBranch: { x: 1 } })),
+];
+
+test("CC: unsupported records in a home are dropped; its good records and the device's own are kept", async () => {
+  const s = homeScratch();
+  s.writeLines([assistant()]);
+  const good = JSON.stringify(assistant({ requestId: "h2", sessionId: "hs", cwd: "/work" }));
+  writeFileSync(join(s.slug, "junk.jsonl"), [...JUNK_LINES, good].join("\n") + "\n");
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id).sort(), ["h1", "h2", "r1"]);
+});
+
+test("CC: a non-record line in the device's own transcript is ignored too", async () => {
+  const s = ccScratch();
+  s.write(["null", "7", JSON.stringify(assistant())].join("\n") + "\n");
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["r1"]);
+});
+
+test("CC: a transcript in a home that cannot be read is skipped, the rest is read", async (t) => {
+  if (process.getuid?.() === 0) return t.skip("root reads anything");
+  const s = homeScratch();
+  s.writeLines([assistant()]);
+  const locked = join(s.slug, "locked.jsonl");
+  writeFileSync(locked, s.lines([assistant({ requestId: "h9" })]));
+  chmodSync(locked, 0o000);
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  chmodSync(locked, 0o600);
+  assert.deepEqual(events.map((e) => e.message_id).sort(), ["h1", "r1"]);
+});
+
+test("OC: unsupported rows in a home are dropped; its good rows and the device's own are kept", async () => {
+  const f = ocHomes();
+  const junk = ocDb({
+    sessions: [{ id: "js", directory: "/work" }],
+    messages: [
+      { id: "j-null", session_id: "js", time_updated: 10, data: null },
+      { id: "j-num", session_id: "js", time_updated: 11, data: 7 },
+      { id: "j-tokens", session_id: "js", time_updated: 12, data: ocData({ tokens: "lots" }) },
+      { id: "j-count", session_id: "js", time_updated: 13, data: ocData({ tokens: { input: "many" } }) },
+      { id: "j-model", session_id: "js", time_updated: 14, data: ocData({ modelID: { a: 1 } }) },
+      { id: "j-time", session_id: "js", time_updated: "soon", data: ocData() },
+      { id: "good", session_id: "js", time_updated: 20, data: ocData() },
+    ],
+  });
+  renameSync(junk.path, f.homeDb);
+  const store = ocStore();
+  const events = await collect(_oc({ store, config: f.config, full: false }));
+  assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new", "good"]);
+  assert.equal(Number(store.getKV(`watermark:opencode:time_updated:${f.homeDb}`)), 20);
+});
+
+test("OC: a message whose data is JSON null in the device's own database is ignored", async () => {
+  const { path } = ocDb({
+    sessions: [{ id: "sess1", directory: "/proj" }],
+    messages: [
+      { id: "n", session_id: "sess1", time_updated: 100, data: null },
+      { id: "a", session_id: "sess1", time_updated: 101, data: ocData() },
+    ],
+  });
+  const events = await collect(_oc({ store: ocStore(), config: { sources: { opencode: { db: path } } }, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["a"]);
 });
