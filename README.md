@@ -258,9 +258,9 @@ when it really is in that home: its real path, with every symlink followed, must
 a regular file. A symlink is the one way a sandbox can make the agent read a file it cannot touch itself, such as your
 own transcripts or another home's database, and reading those through the link would re-file real events under the
 home's name. What is skipped for this reason is reported by `doctor`'s "extra homes" check. A record in a home that
-does not have the expected shape, or that Postgres would refuse (an id over 200 characters, a token count over 1e9,
-a timestamp outside 2000 to 2100), is dropped, and a file there that cannot be read is skipped, so one home cannot
-stop the sync or the shipping of the others or of your own sessions. Two limits remain. The
+does not have the expected shape, or that Postgres would refuse (an id or model name over 200 bytes, a token count
+over 1e9, a timestamp outside 2000 to 2100), is dropped, and a file there that cannot be read is skipped, so one
+home cannot stop the sync or the shipping of the others or of your own sessions. Two limits remain. The
 check and the read are two steps, so a sandbox running during a sync could swap a file in between. And the event key
 has no project in it, so a home that presents the session id and message id of an existing event overwrites that
 event; the ids are not guessable.

@@ -159,7 +159,10 @@ const TOKEN_FIELDS = [
   "cache_write_5m_tokens",
   "cache_write_1h_tokens",
 ];
-const LABEL_FIELDS = ["provider", "model", "agent", "git_branch"];
+// provider and model are indexed together in Postgres, agent and git_branch
+// are not: see the bounds below.
+const INDEXED_LABELS = ["provider", "model"];
+const PLAIN_LABELS = ["agent", "git_branch"];
 
 // Bounds on what a home may put in an event. They are far beyond anything a
 // harness writes, and exist because of what lies downstream: Postgres refuses a
@@ -168,8 +171,16 @@ const LABEL_FIELDS = ["provider", "model", "agent", "git_branch"];
 // row blocks the shipment of all the others, on every run. A lone surrogate is
 // refused here as well: it is sent as U+FFFD, so two different ids can arrive
 // as one key, and Postgres rejects a batch that upserts the same key twice.
-const MAX_ID_LENGTH = 200;
-const MAX_LABEL_LENGTH = 500;
+//
+// The text bounds are in UTF-8 BYTES, which is what Postgres stores and what
+// its limit on an index row (2704 bytes) counts; a JavaScript string's length
+// counts UTF-16 units, and one of those can be three bytes. Every indexed
+// column gets the same bound, so the widest index over home-supplied text —
+// the primary key (harness, session_id, message_id), or (provider, model) —
+// stays under a quarter of that limit. `project` and `device` are indexed too,
+// but come from this device's config, not from the home.
+const MAX_INDEXED_BYTES = 200;
+const MAX_LABEL_BYTES = 500;
 const MAX_TOKENS = 1e9; // per counter, for one API response
 const MIN_TS = Date.UTC(2000, 0, 1);
 const MAX_TS = Date.UTC(2100, 0, 1);
@@ -185,20 +196,28 @@ const MAX_TS = Date.UTC(2100, 0, 1);
  */
 export function wellFormed(ev) {
   if (!ev || typeof ev !== "object") return false;
-  if (!text(ev.session_id, MAX_ID_LENGTH) || !ev.session_id) return false;
-  if (!text(ev.message_id, MAX_ID_LENGTH) || !ev.message_id) return false;
+  if (!text(ev.session_id, MAX_INDEXED_BYTES) || !ev.session_id) return false;
+  if (!text(ev.message_id, MAX_INDEXED_BYTES) || !ev.message_id) return false;
   if (typeof ev.ts !== "string" && typeof ev.ts !== "number") return false;
   const ts = new Date(ev.ts).getTime();
   if (!(ts >= MIN_TS && ts < MAX_TS)) return false;
-  for (const f of LABEL_FIELDS) if (ev[f] != null && !text(ev[f], MAX_LABEL_LENGTH)) return false;
+  for (const f of INDEXED_LABELS) if (ev[f] != null && !text(ev[f], MAX_INDEXED_BYTES)) return false;
+  for (const f of PLAIN_LABELS) if (ev[f] != null && !text(ev[f], MAX_LABEL_BYTES)) return false;
   for (const f of TOKEN_FIELDS) {
     if (!Number.isSafeInteger(ev[f]) || ev[f] < 0 || ev[f] > MAX_TOKENS) return false;
   }
   return true;
 }
 
-function text(v, maxLength) {
-  return typeof v === "string" && v.length <= maxLength && !v.includes("\u0000") && v.isWellFormed();
+function text(v, maxBytes) {
+  // The length test first: it is cheap, and bytes are never fewer than units.
+  return (
+    typeof v === "string" &&
+    v.length <= maxBytes &&
+    v.isWellFormed() &&
+    !v.includes("\u0000") &&
+    Buffer.byteLength(v, "utf8") <= maxBytes
+  );
 }
 
 // One `homes` path to the directories it names. Literal segments before the

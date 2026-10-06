@@ -194,6 +194,19 @@ test("wellFormed: a canonical event is, with an ISO or an epoch-ms timestamp", (
   assert.equal(wellFormed(event({ ts: 1725184800000, agent: "build", git_branch: "main" })), true);
 });
 
+test("wellFormed: text at exactly its byte bound is accepted", () => {
+  const ev = event({
+    session_id: "s".repeat(200),
+    message_id: "\u4e16".repeat(66) + "ab", // 200 bytes
+    provider: "p".repeat(200),
+    model: "\u00e9".repeat(100), // 200 bytes
+    agent: "a".repeat(500),
+    git_branch: "\u4e16".repeat(166) + "ab", // 500 bytes
+    input_tokens: 1e9,
+  });
+  assert.equal(wellFormed(ev), true);
+});
+
 test("wellFormed: wrong shapes are not", () => {
   for (const over of [
     { session_id: null },
@@ -215,6 +228,13 @@ test("wellFormed: wrong shapes are not", () => {
     { cache_write_1h_tokens: {} },
     // within the types, but beyond what Postgres or its index accepts
     { session_id: "s".repeat(201) },
+    // bounds are in UTF-8 bytes: 67 three-byte characters are 201 bytes
+    { session_id: "\u4e16".repeat(67) },
+    { message_id: "\u4e16".repeat(67) },
+    { provider: "\u4e16".repeat(67) },
+    { model: "\u4e16".repeat(67) },
+    { model: "m".repeat(201) },
+    { git_branch: "\u4e16".repeat(167) },
     { message_id: "m\u0000" },
     { model: "a\u0000b" },
     { message_id: "m\ud800" },

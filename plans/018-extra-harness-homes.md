@@ -1,13 +1,20 @@
 # Plan 018 — Extra harness homes
 
 Type: **task**
-Status: **implemented** (2026-10-06), the findings of two reviews fixed (see "Review findings"). Verified:
-`npm test` (191 pass), the first review's failing sync (a `null` line and an outward symlink in a home) now exits 0
-with the other events stored, and on desktop against a copy of the
-`norareit-agent_agent-home` volume with a scratch config and data dir: `sync --no-ship` extracted 153 Claude Code
-and 73 OpenCode events, all under one project; a second run extracted 0; `doctor` passed "extra homes" (1 home, 5
-transcripts, 80 OpenCode messages) and "projects are repo roots". Not verified: the device's real config with a
-`homes` entry, shipping to Postgres and the dashboard (verification steps 2 to 4 on live data), and step 5 (the Mac).
+Status: **implemented** (2026-10-06), the findings of three reviews fixed (see "Review findings"). Verified:
+
+- `npm test` (192 pass).
+- Shipping: 300 events at every bound `wellFormed` allows, sent with the real sink into a throwaway Postgres 17
+  holding this repository's schema.
+- The first review's failing sync (a `null` line and an outward symlink in a home) exits 0 with the other events
+  stored.
+- On desktop, against copies of the four sandbox volumes that hold data, with a scratch config and data dir and
+  an explicit `project` per home: `sync --no-ship` extracted 155 Claude Code and 74 OpenCode events, filed under
+  `/home/stef/projects/norareit` (153 and 73) and `/home/stef/projects/agentrite`; `doctor` passed "extra homes".
+
+Not verified: the device's real config with a `homes` entry, shipping these events to the real database and the
+dashboard (verification steps 2 to 4 on live data), and step 5 (the Mac).
+
 Builds on 001–017.
 
 ## Feature
@@ -218,6 +225,20 @@ writes may be refused later by the store or by Postgres.
 Known limits, not addressed: a home can still cost time and memory (a transcript with one enormous line, a
 database with millions of rows), and the check-then-read race of "Untrusted input" stands. Neither files events
 under another name or stops the sync by an error.
+
+### Third review (2026-10-06)
+
+- **C6, accepted labels could still block shipping.** The bounds of the second round counted JavaScript characters,
+  and Postgres counts UTF-8 bytes: two 500-character labels of three-byte characters made a 3016-byte row for the
+  index on `(provider, model)`, over the 2704-byte limit, and the batch failed. Fix: every text bound is in UTF-8
+  bytes. A column that is part of an index (`session_id`, `message_id`, `provider`, `model`) is at most 200 bytes,
+  so the widest index over text from a home is about 400 bytes; `agent` and `git_branch`, which are not indexed,
+  are at most 500. `project` and `device` are indexed too, but come from the config.
+- The second round's bounds were derived from reading the schema and never run against Postgres. They are now:
+  300 events at every bound at once (non-repeating text over all of Unicode, so nothing compresses, 1e9 in each
+  token counter, both ends of the timestamp range, a cost of 1.2 million) and one ordinary event were upserted
+  twice with `PostgresSink.upsert` into Postgres 17 with `server/postgres/init/01-schema.sql`. Both passes
+  succeeded and all 301 rows were stored.
 
 ## The backlog in existing volumes
 
