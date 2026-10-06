@@ -258,8 +258,9 @@ when it really is in that home: its real path, with every symlink followed, must
 a regular file. A symlink is the one way a sandbox can make the agent read a file it cannot touch itself, such as your
 own transcripts or another home's database, and reading those through the link would re-file real events under the
 home's name. What is skipped for this reason is reported by `doctor`'s "extra homes" check. A record in a home that
-does not have the expected shape is dropped, and a file there that cannot be read is skipped, so one home cannot stop
-the sync of the others or of your own sessions. Two limits remain. The
+does not have the expected shape, or that Postgres would refuse (an id over 200 characters, a token count over 1e9,
+a timestamp outside 2000 to 2100), is dropped, and a file there that cannot be read is skipped, so one home cannot
+stop the sync or the shipping of the others or of your own sessions. Two limits remain. The
 check and the read are two steps, so a sandbox running during a sync could swap a file in between. And the event key
 has no project in it, so a home that presents the session id and message id of an existing event overwrites that
 event; the ids are not guessable.
@@ -316,9 +317,9 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
   deduped one (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0), and 0 usage conflicts within a `requestId`
 * **opencode db / opencode reconciliation** — the DB opens; per-message token sums match the `session` rollup columns
 * **extra homes** — each directory the `homes` entries resolve to, with its project, transcript count and OpenCode
-  message count. Fails when an entry without `*` does not exist, when a database is there and the extractor's query
-  cannot read it, or when a transcript or database was skipped because it is not a file inside its home (the file
-  is named). Absent without `homes`. The checks above and "models priced" keep reading the device's own home only.
+  event count. Fails when an entry without `*` does not exist, when a transcript or database is there and cannot
+  be read the way the extractor reads it, or when one was skipped because it is not a file inside its home (the
+  file is named). Absent without `homes`. The checks above and "models priced" keep reading the device's own home only.
 * **price table** — loads, model count
 * **reasoning tokens billed** — 1M reasoning tokens cost the full output rate (the permanent guard against the
   reasoning-exclusion regression)

@@ -164,6 +164,29 @@ test("inputsFor: a home whose input links into another home is left out, and the
   assert.deepEqual(inputsFor("opencode", config).map((i) => i.home), [null, b]);
 });
 
+// review C3, second round: two DISTINCT homes that reach one file. The child
+// is configured first and must keep it, although the parent sorts first.
+test("inputsFor: of two homes reaching one input, the one configured first keeps it", () => {
+  const dir = mkTmp();
+  const parent = mk(dir, "parent");
+  const child = mk(parent, "child");
+  const childDb = join(mk(child, ".local", "share", "opencode"), "opencode.db");
+  writeFileSync(childDb, "");
+  symlinkSync(childDb, join(mk(parent, ".local", "share", "opencode"), "opencode.db"));
+  const sources = { opencode: { db: join(dir, "oc.db") } };
+  const pick = (homes) => inputsFor("opencode", { sources, homes }).map((i) => i.project);
+  assert.deepEqual(pick([{ home: child, project: "first" }, { home: parent, project: "second" }]), [null, "first"]);
+  assert.deepEqual(pick([{ home: parent, project: "first" }, { home: child, project: "second" }]), [null, "first"]);
+});
+
+test("inputsFor: the homes are in path order, whatever the config order", () => {
+  const dir = mkTmp();
+  const a = mk(dir, "a");
+  const b = mk(dir, "b");
+  const config = { sources: {}, homes: [{ home: b }, { home: a }] };
+  assert.deepEqual(inputsFor("claude-code", config).map((i) => i.home), [null, a, b]);
+});
+
 // --- wellFormed ------------------------------------------------------------
 
 test("wellFormed: a canonical event is, with an ISO or an epoch-ms timestamp", () => {
@@ -190,6 +213,17 @@ test("wellFormed: wrong shapes are not", () => {
     { cache_read_tokens: null },
     { cache_write_5m_tokens: Infinity },
     { cache_write_1h_tokens: {} },
+    // within the types, but beyond what Postgres or its index accepts
+    { session_id: "s".repeat(201) },
+    { message_id: "m\u0000" },
+    { model: "a\u0000b" },
+    { message_id: "m\ud800" },
+    { agent: "x".repeat(501) },
+    { input_tokens: 1e9 + 1 },
+    { ts: "1999-12-31T23:59:59Z" },
+    { ts: "2100-01-01T00:00:00Z" },
+    { ts: -1 },
+    { ts: 8.64e15 },
   ]) {
     assert.equal(wellFormed(event(over)), false, JSON.stringify(over));
   }

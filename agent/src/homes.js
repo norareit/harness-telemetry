@@ -43,35 +43,46 @@ export function homeInputPath(harness, home) {
  *
  * A directory named twice — by two entries, or by an entry and a symlink to it
  * in another — is returned once, as the FIRST entry in the config names it.
- * That precedence is settled here, in config order, before the sort: sorting
- * first would let an alias lose to its target merely because of its spelling.
  *
  * @returns {{home: string, project: string}[]} sorted by path. `project` is
  *   the entry's expanded override, or the home directory's own name.
  */
 export function expandHomes(entries, { fs = nodeFs } = {}) {
+  return byPath(homesInConfigOrder(entries, fs), (h) => h.home);
+}
+
+// Precedence is settled here, in config order, and sorting is left to the
+// callers: sorting first would let an alias lose to its target merely because
+// of its spelling. Within one entry the matches of a `*` are in path order.
+function homesInConfigOrder(entries, fs) {
   const out = [];
   const seen = new Set();
   for (const entry of entries || []) {
     if (!entry || typeof entry.home !== "string" || !entry.home) continue;
-    for (const home of expandPattern(entry.home, fs)) {
+    for (const home of expandPattern(entry.home, fs).sort()) {
       const real = realOrSame(fs, home);
       if (seen.has(real)) continue;
       seen.add(real);
       out.push({ home, project: entry.project ? expandHome(entry.project) : basename(home) });
     }
   }
-  return out.sort((a, b) => (a.home < b.home ? -1 : a.home > b.home ? 1 : 0));
+  return out;
+}
+
+function byPath(list, key) {
+  return [...list].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }
 
 /**
  * What one harness reads: first the device's own input (`project: null`, so
- * the repository-root rule applies), then one per home.
+ * the repository-root rule applies), then one per home, sorted by path.
  *
- * An input whose real path equals that of an earlier one is left out: the
- * device's own wins over a home that resolves to it. Otherwise an OpenCode
+ * An input whose real path equals that of an earlier one is left out. Earlier
+ * means: the device's own, then the homes in CONFIG order — two distinct homes
+ * can reach one file (a home inside another, linking to its database), and the
+ * entry configured first is the one that keeps it. Otherwise an OpenCode
  * database reached twice would be read again under a second watermark key and
- * its events re-filed under the home's name. A path that does not exist is
+ * its events re-filed under the other name. A path that does not exist is
  * compared as written.
  *
  * A home's input that is there but not really inside its home is left out
@@ -84,21 +95,17 @@ export function expandHomes(entries, { fs = nodeFs } = {}) {
  */
 export function inputsFor(harness, config, { fs = nodeFs } = {}) {
   const own = OWN_DEFAULT[harness](config.sources?.[harness] || {});
-  const inputs = [{ path: expandHome(own), project: null, home: null }];
-  for (const { home, project } of expandHomes(config.homes, { fs })) {
-    inputs.push({ path: homeInputPath(harness, home), project, home });
-  }
-
-  const seen = new Set();
-  return inputs.filter((input) => {
-    if (input.home && present(fs, input.path) && !insideHome(input.home, input.path, { fs })) {
-      return false;
-    }
-    const real = realOrSame(fs, input.path);
-    if (seen.has(real)) return false;
+  const seen = new Set([realOrSame(fs, expandHome(own))]);
+  const fromHomes = [];
+  for (const { home, project } of homesInConfigOrder(config.homes, fs)) {
+    const path = homeInputPath(harness, home);
+    if (present(fs, path) && !insideHome(home, path, { fs })) continue;
+    const real = realOrSame(fs, path);
+    if (seen.has(real)) continue;
     seen.add(real);
-    return true;
-  });
+    fromHomes.push({ path, project, home });
+  }
+  return [{ path: expandHome(own), project: null, home: null }, ...byPath(fromHomes, (i) => i.path)];
 }
 
 /**
@@ -152,25 +159,46 @@ const TOKEN_FIELDS = [
   "cache_write_5m_tokens",
   "cache_write_1h_tokens",
 ];
-const TEXT_OR_NULL = ["provider", "model", "agent", "git_branch"];
+const LABEL_FIELDS = ["provider", "model", "agent", "git_branch"];
+
+// Bounds on what a home may put in an event. They are far beyond anything a
+// harness writes, and exist because of what lies downstream: Postgres refuses a
+// NUL in text, a key too long for its index, a cost beyond numeric(14,6) and a
+// timestamp outside its range — and rows are shipped in batches, so one refused
+// row blocks the shipment of all the others, on every run. A lone surrogate is
+// refused here as well: it is sent as U+FFFD, so two different ids can arrive
+// as one key, and Postgres rejects a batch that upserts the same key twice.
+const MAX_ID_LENGTH = 200;
+const MAX_LABEL_LENGTH = 500;
+const MAX_TOKENS = 1e9; // per counter, for one API response
+const MIN_TS = Date.UTC(2000, 0, 1);
+const MAX_TS = Date.UTC(2100, 0, 1);
 
 /**
- * Whether an event extracted from a home has the shape the rest of the
- * pipeline assumes: text ids, a timestamp that parses, text-or-null labels and
- * token counts that are non-negative whole numbers. The parsers were written
- * for files the harnesses themselves produce; a home's file may hold anything,
- * and one record the pricing or the store chokes on would abort the whole
- * sync, the device's own events included. Such an event is dropped instead.
+ * Whether an event extracted from a home has the shape, and stays within the
+ * bounds, the rest of the pipeline assumes: short text ids, a plausible
+ * timestamp, text-or-null labels and token counts that are non-negative whole
+ * numbers. The parsers were written for files the harnesses themselves
+ * produce; a home's file may hold anything, and one event the pricing, the
+ * store or Postgres refuses would stop the sync or the shipment for everything
+ * else. Such an event is dropped instead. Never throws.
  */
 export function wellFormed(ev) {
   if (!ev || typeof ev !== "object") return false;
-  if (typeof ev.session_id !== "string" || !ev.session_id) return false;
-  if (typeof ev.message_id !== "string" || !ev.message_id) return false;
+  if (!text(ev.session_id, MAX_ID_LENGTH) || !ev.session_id) return false;
+  if (!text(ev.message_id, MAX_ID_LENGTH) || !ev.message_id) return false;
   if (typeof ev.ts !== "string" && typeof ev.ts !== "number") return false;
-  if (Number.isNaN(new Date(ev.ts).getTime())) return false;
-  for (const f of TEXT_OR_NULL) if (ev[f] != null && typeof ev[f] !== "string") return false;
-  for (const f of TOKEN_FIELDS) if (!Number.isSafeInteger(ev[f]) || ev[f] < 0) return false;
+  const ts = new Date(ev.ts).getTime();
+  if (!(ts >= MIN_TS && ts < MAX_TS)) return false;
+  for (const f of LABEL_FIELDS) if (ev[f] != null && !text(ev[f], MAX_LABEL_LENGTH)) return false;
+  for (const f of TOKEN_FIELDS) {
+    if (!Number.isSafeInteger(ev[f]) || ev[f] < 0 || ev[f] > MAX_TOKENS) return false;
+  }
   return true;
+}
+
+function text(v, maxLength) {
+  return typeof v === "string" && v.length <= maxLength && !v.includes("\u0000") && v.isWellFormed();
 }
 
 // One `homes` path to the directories it names. Literal segments before the

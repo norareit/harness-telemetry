@@ -31,8 +31,7 @@ import { projectRootOf } from "../project.js";
 const HARNESS = "opencode";
 const WATERMARK_KEY = "watermark:opencode:time_updated";
 
-// What extraction reads. Shared with `readableMessages`, so that doctor judges
-// a database by the very query the extractor will run against it.
+// What extraction reads.
 const MESSAGE_QUERY = `SELECT
      m.id           AS message_id,
      m.session_id   AS session_id,
@@ -47,6 +46,31 @@ const MESSAGE_QUERY = `SELECT
    WHERE m.time_updated >= ?
    ORDER BY m.time_updated ASC`;
 
+// The same rows from a home's database (plans/018), where a column may hold
+// anything: SQLite does not enforce column types. A row is kept only when its
+// key columns are text and its time is an integer JavaScript can represent —
+// node:sqlite throws on a larger one, and it does so while fetching, before any
+// check on our side could look at the row. The optional columns are passed on
+// when they are text and read as NULL otherwise.
+const HOME_MESSAGE_QUERY = `SELECT
+     message_id, session_id, time_updated, data,
+     CASE WHEN typeof(session_dir) = 'text' THEN session_dir END AS session_dir,
+     CASE WHEN typeof(parent_id)   = 'text' THEN parent_id   END AS parent_id,
+     CASE WHEN typeof(branch)      = 'text' THEN branch      END AS branch
+   FROM (${MESSAGE_QUERY})
+   WHERE typeof(message_id) = 'text'
+     AND typeof(session_id) = 'text'
+     AND typeof(data) = 'text'
+     AND typeof(time_updated) = 'integer'
+     AND time_updated BETWEEN 0 AND ${Number.MAX_SAFE_INTEGER}
+   ORDER BY time_updated ASC`;
+
+// The three names the query reads must be ordinary tables. A view of that name
+// could hide an arbitrarily expensive query behind a plain SELECT.
+const HOME_TABLES_QUERY = `SELECT COUNT(*) AS c FROM sqlite_master
+   WHERE type = 'table' AND name IN ('message', 'session', 'workspace')
+     AND sql NOT LIKE 'CREATE VIRTUAL%'`;
+
 export async function* extractOpenCode({ store, config, full = false }) {
   // plans/018: the device's own database, then one per extra home.
   for (const input of inputsFor(HARNESS, config)) {
@@ -55,13 +79,10 @@ export async function* extractOpenCode({ store, config, full = false }) {
 }
 
 async function* extractDatabase({ store, config, full, input }) {
-  // A home's content is untrusted (plans/018): its database is opened only
-  // when it, and any -wal/-shm beside it, really are files inside the home.
-  if (input.home && !databaseInHome(input.home, input.path)) return;
-
-  // The watermark is per database. The device's own keeps the original key, so
-  // nothing is re-read after an upgrade.
-  const watermarkKey = input.home ? `${WATERMARK_KEY}:${input.path}` : WATERMARK_KEY;
+  if (input.home) {
+    yield* extractHomeDatabase({ store, full, input });
+    return;
+  }
 
   let db;
   try {
@@ -72,47 +93,94 @@ async function* extractDatabase({ store, config, full, input }) {
   }
 
   try {
-    const since = full ? 0 : Number(store.getKV(watermarkKey) || 0);
-
-    let rows;
-    try {
-      rows = db.prepare(MESSAGE_QUERY).all(since);
-    } catch (err) {
-      // A home's database that is not an OpenCode database (or not a database
-      // at all) is skipped, and the other inputs are still read. The device's
-      // own failing here is a real fault and stays loud.
-      if (input.home && err.code === "ERR_SQLITE_ERROR") return;
-      throw err;
-    }
+    const since = full ? 0 : Number(store.getKV(WATERMARK_KEY) || 0);
+    const rows = db.prepare(MESSAGE_QUERY).all(since);
 
     // plans/008: same repository-root rule as Claude Code, applied here where
     // `config` is available. See extractClaudeCode for why not inside toEvent.
     const detectRoot = config.project?.detectRoot !== false;
     let maxWatermark = since;
     for (const row of rows) {
-      // SQLite columns are untyped: a home's row may hold anything here.
-      if (input.home && !Number.isSafeInteger(row.time_updated)) continue;
       maxWatermark = Math.max(maxWatermark, row.time_updated);
       const ev = toEvent(row);
-      if (!ev) continue;
-      if (input.home) {
-        // Untrusted content (plans/018): drop what is not well formed rather
-        // than let one row abort the sync of everything else.
-        if (!wellFormed(ev)) continue;
-        ev.project = input.project;
-      } else if (detectRoot) {
-        ev.project = projectRootOf(ev.project);
+      if (ev) {
+        if (detectRoot) ev.project = projectRootOf(ev.project);
+        yield ev;
       }
-      yield ev;
     }
 
-    if (maxWatermark > since) store.setKV(watermarkKey, maxWatermark);
+    if (maxWatermark > since) store.setKV(WATERMARK_KEY, maxWatermark);
   } finally {
     db.close();
   }
 }
 
+// The database of an extra home (plans/018). Its events are filed under the
+// home's project. The watermark is per database; the device's own keeps the
+// original key, so nothing is re-read after an upgrade. Whatever goes wrong
+// while reading it — not a database, not OpenCode's schema, a value SQLite or
+// JavaScript cannot hand over — the database is skipped for this run and the
+// other inputs are still read. doctor's "extra homes" check reads it the same
+// way (readHomeDatabase) and reports the failure.
+async function* extractHomeDatabase({ store, full, input }) {
+  // Opened only when it, and any -wal/-shm beside it, really are files inside
+  // the home.
+  if (!databaseInHome(input.home, input.path)) return;
+
+  const watermarkKey = `${WATERMARK_KEY}:${input.path}`;
+  const since = full ? 0 : Number(store.getKV(watermarkKey) || 0);
+  let read;
+  try {
+    read = readHomeDatabase(input.path, since);
+  } catch {
+    return;
+  }
+  for (const ev of read.events) {
+    ev.project = input.project;
+    yield ev;
+  }
+  if (read.maxWatermark > since) store.setKV(watermarkKey, read.maxWatermark);
+}
+
+/**
+ * The well-formed events of a home's database with `time_updated >= since`,
+ * and the highest `time_updated` among the rows read. Throws when the file
+ * cannot be read as an OpenCode database. Shared by the extractor and by
+ * `doctor`, so doctor judges a database by exactly what extraction does with
+ * it; the caller must have checked `databaseInHome` first.
+ *
+ * @returns {{events: object[], maxWatermark: number}}
+ */
+export function readHomeDatabase(dbPath, since = 0) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    if (db.prepare(HOME_TABLES_QUERY).get().c !== 3) {
+      throw new Error("not an OpenCode database: message, session and workspace must be tables");
+    }
+    const events = [];
+    let maxWatermark = since;
+    for (const row of db.prepare(HOME_MESSAGE_QUERY).all(since)) {
+      maxWatermark = Math.max(maxWatermark, row.time_updated);
+      const ev = toEvent(row);
+      if (ev && wellFormed(ev)) events.push(ev);
+    }
+    return { events, maxWatermark };
+  } finally {
+    db.close();
+  }
+}
+
+// Never throws: a row it cannot make an event of is null, like a row it would
+// ignore. One such row must not end the read of the database.
 function toEvent(row) {
+  try {
+    return toEventUnguarded(row);
+  } catch {
+    return null;
+  }
+}
+
+function toEventUnguarded(row) {
   let d;
   try {
     d = JSON.parse(row.data);
@@ -148,21 +216,6 @@ function toEvent(row) {
     cache_write_5m_tokens: cache.write ?? 0, // OpenCode has no TTL split
     cache_write_1h_tokens: 0,
   };
-}
-
-/**
- * How many messages the extractor's own query returns from a database, for
- * `doctor`'s "extra homes" check. Throws when the database cannot be opened or
- * lacks a table or column extraction needs — a count over `message` alone
- * would call such a database healthy while extraction read nothing from it.
- */
-export function readableMessages(dbPath) {
-  const db = new DatabaseSync(expandHome(dbPath), { readOnly: true });
-  try {
-    return db.prepare(`SELECT COUNT(*) AS c FROM (${MESSAGE_QUERY})`).get(0).c;
-  } finally {
-    db.close();
-  }
 }
 
 /**

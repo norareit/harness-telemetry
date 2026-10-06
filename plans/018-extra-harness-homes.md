@@ -1,8 +1,8 @@
 # Plan 018 — Extra harness homes
 
 Type: **task**
-Status: **implemented** (2026-10-06), review findings S1 and C1 to C3 fixed (see the last section). Verified:
-`npm test` (182 pass), the reviewer's failing sync (a `null` line and an outward symlink in a home) now exits 0
+Status: **implemented** (2026-10-06), the findings of two reviews fixed (see "Review findings"). Verified:
+`npm test` (191 pass), the first review's failing sync (a `null` line and an outward symlink in a home) now exits 0
 with the other events stored, and on desktop against a copy of the
 `norareit-agent_agent-home` volume with a scratch config and data dir: `sync --no-ship` extracted 153 Claude Code
 and 73 OpenCode events, all under one project; a second run extracted 0; `doctor` passed "extra homes" (1 home, 5
@@ -185,6 +185,39 @@ A review of the implementation found four faults. All are fixed, each with tests
 - **C3, sorting decided which entry won.** `expandHomes` sorted before `inputsFor` removed aliases, so of a symlink
   and its target the one that sorts first won, not the one configured first. Fix: `expandHomes` removes duplicates
   by real path in config order, and sorts what is left.
+
+### Second review (2026-10-06)
+
+The first round fixed the examples the review gave, not the class behind them. Four more faults of the same kind
+followed. This round closes the class: nothing read from a home may throw past the extractor, and nothing a home
+writes may be refused later by the store or by Postgres.
+
+- **C1 again, an integer too large for JavaScript aborted the sync.** `node:sqlite` throws while fetching such a
+  value, before a check on the row can run. Fix: a home's database is read through `HOME_MESSAGE_QUERY`, which keeps
+  a row only when its key columns are text and its `time_updated` is an integer within JavaScript's safe range, and
+  reads a non-text optional column as NULL. The filtering is done by SQLite, so the value is never fetched. Any
+  error while reading a home's database, of whatever kind, now skips that database. `message`, `session` and
+  `workspace` must be ordinary tables: a view of that name could hide an expensive query.
+- **C3 again, two different homes reaching one file.** A home inside another, with the outer one linking to the
+  inner one's database: both pass the containment rule, and the one that sorted first won. Fix: `inputsFor` works
+  in config order (device's own, then entries as configured), and sorts the surviving home inputs afterwards.
+- **C4, a value that cannot be coerced ended the read of the transcript.** `output_tokens: { "toString": null }`
+  made the parser itself throw, before `wellFormed` saw the event, and the catch around the file dropped every
+  later record too. Fix: `parseRecord` and `toEvent` never throw; a record they cannot make an event of is null,
+  like one they ignore. This holds for the device's own files as well, where the same line would have aborted
+  every sync.
+- **C5, doctor passed a transcript the extractor gives up on.** Fix: "extra homes" reads every transcript in full
+  with `countHomeEvents`, the extractor's parser, dedupe and shape check without a store, and reads each database
+  with `readHomeDatabase`, the function the extractor itself uses. It reports events, not files or rows: "1
+  transcripts with 153 events, 73 opencode events". A file the extractor would skip fails the check by name.
+- **Found while fixing, not by the review: a well-typed event could still block shipping.** Events go to Postgres
+  in batches of 500, and one refused row fails its batch on every run. `wellFormed` therefore also bounds an
+  event from a home: ids at most 200 characters and labels at most 500, no NUL and no lone surrogate in any text,
+  each token count at most 1e9, a timestamp between 2000 and 2100.
+
+Known limits, not addressed: a home can still cost time and memory (a transcript with one enormous line, a
+database with millions of rows), and the check-then-read race of "Untrusted input" stands. Neither files events
+under another name or stops the sync by an error.
 
 ## The backlog in existing volumes
 

@@ -529,3 +529,87 @@ test("OC: a message whose data is JSON null in the device's own database is igno
   const events = await collect(_oc({ store: ocStore(), config: { sources: { opencode: { db: path } } }, full: true }));
   assert.deepEqual(events.map((e) => e.message_id), ["a"]);
 });
+
+// --- second review of plans/018 --------------------------------------------
+
+// C4: coercing this token count throws inside the parser. The record must be
+// dropped on its own; the valid record after it must still be read.
+const UNCOERCIBLE = JSON.stringify(
+  assistant({ requestId: "bad", message: { usage: { input_tokens: 1, output_tokens: { toString: null } } } }),
+);
+
+test("CC: a record whose values cannot be coerced is dropped alone, in a home", async () => {
+  const s = homeScratch();
+  const good = JSON.stringify(assistant({ requestId: "h2", sessionId: "hs", cwd: "/work" }));
+  const path = join(s.slug, "mixed.jsonl");
+  writeFileSync(path, [UNCOERCIBLE, good].join("\n") + "\n");
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }));
+  assert.deepEqual(events.map((e) => e.message_id).sort(), ["h1", "h2"]);
+  assert.ok(s.store.getFileCursor(path), "the file was read to the end and its cursor stored");
+  const again = await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }));
+  assert.deepEqual(again, []);
+});
+
+test("CC: a record whose values cannot be coerced is dropped alone, in the device's own transcript", async () => {
+  const s = ccScratch();
+  s.write([UNCOERCIBLE, JSON.stringify(assistant())].join("\n") + "\n");
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["r1"]);
+});
+
+test("CC: a home's event beyond the bounds Postgres accepts is dropped", async () => {
+  const s = homeScratch();
+  writeFileSync(join(s.slug, "big.jsonl"), s.lines([
+    assistant({ requestId: "nul\u0000", sessionId: "hs" }),
+    assistant({ requestId: "x".repeat(300), sessionId: "hs" }),
+    assistant({ requestId: "huge", sessionId: "hs", message: { usage: { input_tokens: 9e15, output_tokens: 1 } } }),
+    assistant({ requestId: "old", sessionId: "hs", timestamp: "-271821-04-20T00:00:00Z" }),
+  ]));
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["h1"]);
+});
+
+// C1, second round: values node:sqlite cannot hand over as a JavaScript number
+// make the FETCH throw, so they have to be kept out by the query itself.
+test("OC: integers beyond JavaScript's range in a home's database do not stop the read", async () => {
+  const f = ocHomes();
+  // Columns without a declared type, so SQLite stores each value as given
+  // (a TEXT column would turn the integers below into harmless text).
+  const db = new DatabaseSync(f.homeDb);
+  const data = JSON.stringify(ocData());
+  const BIG = "9223372036854775807";
+  db.exec(`
+    CREATE TABLE message (id, session_id, time_created, time_updated, data);
+    CREATE TABLE session (id, directory, parent_id, workspace_id);
+    CREATE TABLE workspace (id, branch, directory);
+    INSERT INTO session VALUES ('s', ${BIG}, ${BIG}, 'w');
+    INSERT INTO workspace VALUES ('w', ${BIG}, NULL);
+    INSERT INTO message VALUES ('good', 's', 0, 100, '${data}');
+    INSERT INTO message VALUES ('big-time', 's', 0, ${BIG}, '${data}');
+    INSERT INTO message VALUES (${BIG}, 's', 0, 101, '${data}');
+    INSERT INTO message VALUES ('big-data', 's', 0, 102, ${BIG});
+    INSERT INTO message VALUES ('blob-data', 's', 0, 103, x'00ff');
+    INSERT INTO message VALUES ('negative-time', 's', 0, -5, '${data}');
+    INSERT INTO message VALUES ('text-time', 's', 0, 'soon', '${data}');
+    INSERT INTO message VALUES ('real-time', 's', 0, 1.5, '${data}');
+  `);
+  db.close();
+  const store = ocStore();
+  const events = await collect(_oc({ store, config: f.config, full: false }));
+  assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new", "good"]);
+  const good = events[2];
+  assert.equal(good.project, "norareit");
+  assert.equal(good.is_sidechain, false, "a parent_id that is not text is read as none");
+  assert.equal(good.git_branch, null);
+  assert.equal(Number(store.getKV(`watermark:opencode:time_updated:${f.homeDb}`)), 100);
+});
+
+test("OC: a home's database whose message is a view is skipped, the others are read", async () => {
+  const f = ocHomes();
+  renameSync(f.inHome.path, f.homeDb);
+  const db = new DatabaseSync(f.homeDb);
+  db.exec("ALTER TABLE message RENAME TO m2; CREATE VIEW message AS SELECT * FROM m2;");
+  db.close();
+  const events = await collect(_oc({ store: ocStore(), config: f.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new"]);
+});

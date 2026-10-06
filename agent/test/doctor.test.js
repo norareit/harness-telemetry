@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -246,14 +246,22 @@ function homeFixture(t) {
   mkdirSync(slug, { recursive: true });
   mkdirSync(ocDir, { recursive: true });
   mkdirSync(join(dir, "outside"));
-  writeFileSync(join(slug, "s1.jsonl"), "{}\n");
+  const record = {
+    type: "assistant", requestId: "r1", sessionId: "s1", timestamp: "2026-09-01T10:00:00Z", cwd: "/work",
+    message: { model: "claude-sonnet-5", usage: { input_tokens: 1, output_tokens: 2 } },
+  };
+  writeFileSync(join(slug, "s1.jsonl"), JSON.stringify(record) + "\n");
+  const data = JSON.stringify({
+    role: "assistant", providerID: "openai", modelID: "gpt-6-sol", time: { completed: 1756720800000 },
+    tokens: { input: 1, output: 2 },
+  });
   const db = new DatabaseSync(join(ocDir, "opencode.db"));
   db.exec(`
     CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
     CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, workspace_id TEXT);
     CREATE TABLE workspace (id TEXT PRIMARY KEY, branch TEXT, directory TEXT);
     INSERT INTO session (id, directory) VALUES ('s1', '/work');
-    INSERT INTO message VALUES ('m1', 's1', 1, 1, '{}'), ('m2', 's1', 2, 2, '{}');
+    INSERT INTO message VALUES ('m1', 's1', 1, 1, '${data}'), ('m2', 's1', 2, 2, '${data}');
   `);
   db.close();
   const ctx = (homes) => ({ config: { homes }, ccEnabled: true, ocEnabled: true });
@@ -266,7 +274,7 @@ test("check 'extra homes': absent without homes, lists a home and its project", 
 
   const r = await check("extra homes")(f.ctx([{ home: join(f.dir, "homes", "*") }]));
   assert.equal(r.ok, true);
-  assert.match(r.detail, /^1 home: .*norareit → norareit \(1 transcripts, 2 opencode messages\)$/);
+  assert.match(r.detail, /^1 home: .*norareit → norareit \(1 transcripts with 1 events, 2 opencode events\)$/);
 });
 
 test("check 'extra homes': a missing entry fails, a wildcard that matches nothing passes", async (t) => {
@@ -310,4 +318,26 @@ test("check 'extra homes': a file that is not inside its home fails and is named
   assert.equal(r.ok, false);
   assert.match(r.detail, /1 transcripts/);
   assert.match(r.detail, /skipped, not a file inside its home: .*s2\.jsonl/);
+});
+
+test("check 'extra homes': a transcript that cannot be read fails and is named (review C5)", async (t) => {
+  if (process.getuid?.() === 0) return t.skip("root reads anything");
+  const f = homeFixture(t);
+  const locked = join(f.slug, "s1.jsonl");
+  chmodSync(locked, 0o000);
+  const r = await check("extra homes")(f.ctx([{ home: f.home }]));
+  chmodSync(locked, 0o600);
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /0 transcripts with 0 events/);
+  assert.match(r.detail, /cannot read .*s1\.jsonl: .*EACCES/);
+});
+
+test("check 'extra homes': a database whose message is a view, not a table, fails", async (t) => {
+  const f = homeFixture(t);
+  const db = new DatabaseSync(join(f.ocDir, "opencode.db"));
+  db.exec("ALTER TABLE message RENAME TO m2; CREATE VIEW message AS SELECT * FROM m2;");
+  db.close();
+  const r = await check("extra homes")(f.ctx([{ home: f.home }]));
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /cannot read .*opencode\.db: not an OpenCode database/);
 });

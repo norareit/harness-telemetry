@@ -60,8 +60,29 @@ async function* readHomeTranscript({ store, path, full, project }) {
       yield ev;
     }
   } catch {
-    // skipped; doctor's "extra homes" check reports what it cannot read
+    // Skipped. doctor's "extra homes" check reads the file the same way
+    // (countHomeEvents) and reports the failure.
   }
+}
+
+/**
+ * How many events a home's transcript holds, read in full the way the
+ * extractor reads it (same parser, same dedupe, same shape check) but without
+ * a store. Rejects when the file cannot be read. For `doctor`, so that a
+ * transcript the extractor gives up on is reported rather than counted.
+ */
+export async function countHomeEvents(path) {
+  const rl = createInterface({
+    input: createReadStream(path, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  const seen = new Set();
+  let events = 0;
+  for await (const line of rl) {
+    const ev = parseLine(line, seen);
+    if (ev && wellFormed(ev)) events++;
+  }
+  return events;
 }
 
 // The transcripts to read for one input. A home's content is untrusted
@@ -168,8 +189,22 @@ function parseLine(line, seen) {
  * requestId/uuid to dedupe on). Exported so `doctor` reads a record exactly the
  * way the extractor does, instead of re-implementing the parse and drifting
  * from it (review finding C7).
+ *
+ * Never throws. A line is whatever was written to the file, and "a line it
+ * would ignore" includes one whose values cannot even be coerced (a token
+ * count that is an object without a usable toString, say). Were that to throw,
+ * the one line would end the read of the file, and for the device's own file
+ * the sync — on every run, since the line stays where it is.
  */
 export function parseRecord(line) {
+  try {
+    return parseRecordUnguarded(line);
+  } catch {
+    return null;
+  }
+}
+
+function parseRecordUnguarded(line) {
   if (!line.trim()) return null;
   let rec;
   try {

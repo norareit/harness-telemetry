@@ -19,8 +19,8 @@ import { loadConfig, expandHome, CONFIG_PATH, DATA_DIR } from "./config.js";
 import { LocalStore } from "./local-store.js";
 import { loadPricing } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
-import { reconcile, listModels, readableMessages } from "./sources/opencode.js";
-import { parseRecord, providerOf, listTranscripts } from "./sources/claude-code.js";
+import { reconcile, listModels, readHomeDatabase } from "./sources/opencode.js";
+import { parseRecord, providerOf, listTranscripts, countHomeEvents } from "./sources/claude-code.js";
 import { projectRootOf } from "./project.js";
 import { databaseInHome, expandHomes, fileInHome, homeInputPath } from "./homes.js";
 import { homedir } from "node:os";
@@ -508,10 +508,12 @@ function livenessHint() {
 }
 
 // plans/018: what the `homes` entries resolve to, and what would be read from
-// each. Absent without `homes`. A home's content is untrusted, so a transcript
-// or database that is not really inside its home is skipped by the extractors —
-// and reported here, by name, because it means something in that home points
-// outside it. The other checks keep reading the device's own home only.
+// each. Absent without `homes`. A home's content is untrusted, so the
+// extractors skip, without failing the sync, a transcript or database that is
+// not really inside its home or that cannot be read. This check is where that
+// becomes visible: it reads every file the way the extractors do and names
+// each one they would skip. The other checks keep reading the device's own
+// home only.
 async function checkExtraHomes(ctx) {
   const entries = ctx.config.homes || [];
   if (!entries.length) return null;
@@ -533,11 +535,23 @@ async function checkExtraHomes(ctx) {
       } catch (err) {
         problems.push(`cannot list transcripts of ${home}: ${err.message}`);
       }
-      const read = transcripts.filter((t) => fileInHome(home, t));
+      // Each transcript is read in full, the way the extractor reads it, so
+      // that one it would give up on (no permission, say) fails here.
+      let read = 0;
+      let events = 0;
       for (const t of transcripts) {
-        if (!read.includes(t)) problems.push(`skipped, not a file inside its home: ${t}`);
+        if (!fileInHome(home, t)) {
+          problems.push(`skipped, not a file inside its home: ${t}`);
+          continue;
+        }
+        try {
+          events += await countHomeEvents(t);
+          read++;
+        } catch (err) {
+          problems.push(`cannot read ${t}: ${err.message}`);
+        }
       }
-      parts.push(`${read.length} transcripts`);
+      parts.push(`${read} transcripts with ${events} events`);
     }
 
     if (ctx.ocEnabled) {
@@ -548,8 +562,8 @@ async function checkExtraHomes(ctx) {
         problems.push(`skipped, not a file inside its home: ${dbPath}`);
       } else {
         try {
-          // The extractor's own query, so a schema it cannot read fails here.
-          parts.push(`${readableMessages(dbPath)} opencode messages`);
+          // The extractor's own read, so whatever makes it skip fails here.
+          parts.push(`${readHomeDatabase(dbPath).events.length} opencode events`);
         } catch (err) {
           problems.push(`cannot read ${dbPath}: ${err.message}`);
         }
