@@ -1,7 +1,11 @@
 # Plan 018 — Extra harness homes
 
 Type: **task**
-Status: **planned** (2026-10-06). Not implemented, nothing verified.
+Status: **implemented** (2026-10-06). Verified: `npm test` (170 pass), and on desktop against a copy of the
+`norareit-agent_agent-home` volume with a scratch config and data dir: `sync --no-ship` extracted 153 Claude Code
+and 73 OpenCode events, all under one project; a second run extracted 0; `doctor` passed "extra homes" (1 home, 5
+transcripts, 80 OpenCode messages) and "projects are repo roots". Not verified: the device's real config with a
+`homes` entry, shipping to Postgres and the dashboard (verification steps 2 to 4 on live data), and step 5 (the Mac).
 Builds on 001–017.
 
 ## Feature
@@ -95,20 +99,24 @@ with the rule above a sandbox cannot make the agent read those of other projects
     (`{ path, project: null, home: null }` from `sources`), then one per home (`{ path, project, home }`).
   - `insideHome(home, path, { fs })` is true when `realpath(path)` equals or starts with `realpath(home) + "/"`.
     It is false when either path cannot be resolved.
+  - Added while implementing: `fileInHome` is `insideHome` plus "is a regular file", and is what the extractors
+    use. A directory or a FIFO named like a transcript would otherwise fail or block the sync. `databaseInHome`
+    applies it to the database and to a `-wal` or `-shm` file that exists beside it.
   - `inputsFor` drops duplicates: an input whose real path (`realpath`) equals that of an earlier one in the list is
     left out. The device's own input therefore wins over a home that resolves to it, and the first entry wins
     among homes. A path that does not exist is compared as written. Without this, an OpenCode database reached
     twice would be read again under a second watermark key and its events re-filed under the home's name.
 - `agent/src/sources/claude-code.js`: `extractClaudeCode` loops over `inputsFor("claude-code", config)`. With
   `project: null` it behaves as now. With a project it sets `ev.project` to it, skips `projectRootOf`, and skips
-  every transcript for which `insideHome` is false. Cursors are keyed by file path already, so nothing changes
-  there.
+  every transcript for which `fileInHome` is false. Cursors are keyed by file path already, so nothing changes
+  there. A home's projects root that cannot be listed (a file where the directory should be) is skipped and does
+  not fail the sync.
 - `agent/src/sources/opencode.js`: `extractOpenCode` loops over `inputsFor("opencode", config)`. The watermark is
   per database: the device's own keeps the key `watermark:opencode:time_updated`, so nothing is re-read after the
   upgrade, and a home's database uses `watermark:opencode:time_updated:<db path>`. `resetCursors()` deletes
   `watermark:%`, which covers both. A database that cannot be opened is skipped, as now, and the others are still
-  read. A home's database is skipped without being opened when `insideHome` is false for it, or for a `-wal` or
-  `-shm` file that exists beside it.
+  read. A home's database is skipped without being opened when `databaseInHome` is false for it. A home's file
+  that opens but is not an OpenCode database is skipped too. The device's own failing that way stays an error.
 - `agent/src/project.js`: `projectRootOf` returns a non-absolute value unchanged, before the cache and the walk.
   Today it would test `<name>/.git` against the process's working directory. This one guard covers `doctor`'s
   "projects are repo roots" check and `scripts/reroot-project.mjs`, which both call it on stored values.

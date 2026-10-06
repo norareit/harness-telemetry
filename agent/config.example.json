@@ -24,6 +24,16 @@
     }
   },
 
+  "//homes": [
+    "Extra homes: directories laid out like a user's home, read in addition to `sources`.",
+    "Under each, <home>/.claude/projects and <home>/.local/share/opencode/opencode.db are read when present.",
+    "A path segment that is exactly * matches every directory at that level. Every event from a home is filed",
+    "under `project`, or under the home directory's own name without it. Examples:",
+    "  { \"home\": \"~/.local/share/agentrite/*\" }",
+    "  { \"home\": \"~/backup/laptop-home\", \"project\": \"~/projects/finrite\" }"
+  ],
+  "homes": [],
+
   "pricing": {
     "modelsJson": "~/.cache/opencode/models.json",
     "//overrides": "null = use the bundled agent/pricing-overrides.json",

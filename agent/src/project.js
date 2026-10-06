@@ -31,7 +31,7 @@
 
 import os from "node:os";
 import nodeFs from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 // Presence in a directory means "each of my immediate children is its own
 // project". Content is ignored (put a comment in it explaining why it's there).
@@ -40,7 +40,7 @@ export const SPLIT_MARKER = ".harness-split";
 const cache = new Map();
 
 /**
- * @param {string|null} dir  a working directory (absolute), or null
+ * @param {string|null} dir  a working directory (absolute), a project name (returned unchanged), or null
  * @param {object} [o]
  * @param {string} [o.home]  the boundary the walk stops before (default $HOME)
  * @param {object} [o.fs]    a fs module (statSync and readFileSync), for tests
@@ -48,6 +48,10 @@ const cache = new Map();
  */
 export function projectRootOf(dir, { home = os.homedir(), fs = nodeFs } = {}) {
   if (!dir) return dir;
+  // plans/018: an event from an extra home is filed under a name, not a path.
+  // A name has no repository above it, and walking it would test `<name>/.git`
+  // against the process's working directory.
+  if (!isAbsolute(dir)) return dir;
   if (cache.has(dir)) return cache.get(dir);
 
   const stop = trimSlash(home);

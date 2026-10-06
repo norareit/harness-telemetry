@@ -10,7 +10,7 @@
 // re-implementing them — there is one definition of "which model is this", so
 // doctor and extraction cannot disagree (review finding C7).
 
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
@@ -22,6 +22,7 @@ import { PostgresSink } from "./sink-postgres.js";
 import { reconcile, listModels } from "./sources/opencode.js";
 import { parseRecord, providerOf, listTranscripts } from "./sources/claude-code.js";
 import { projectRootOf } from "./project.js";
+import { databaseInHome, expandHomes, fileInHome, homeInputPath } from "./homes.js";
 import { homedir } from "node:os";
 
 // Dedupe regression. The absolute totals drift up as the machine keeps being
@@ -47,6 +48,7 @@ export const CHECKS = [
   { name: "claude-code dedupe regression", run: checkClaudeCodeDedupe },
   { name: "opencode db", run: checkOpenCodeDb },
   { name: "opencode reconciliation", run: checkOpenCodeReconciliation },
+  { name: "extra homes", run: checkExtraHomes },
   { name: "price table", run: checkPriceTable },
   { name: "reasoning tokens billed", run: checkReasoningBilled },
   { name: "scenarios resolve", run: checkScenariosResolve },
@@ -503,6 +505,89 @@ function livenessHint() {
   return process.platform === "darwin"
     ? "check 'launchctl print gui/$(id -u)/com.ritenoar.harness-usage' and ~/Library/Logs/harness-usage.log"
     : "check 'systemctl --user status harness-usage.timer' / 'journalctl --user -u harness-usage'";
+}
+
+// plans/018: what the `homes` entries resolve to, and what would be read from
+// each. Absent without `homes`. A home's content is untrusted, so a transcript
+// or database that is not really inside its home is skipped by the extractors —
+// and reported here, by name, because it means something in that home points
+// outside it. The other checks keep reading the device's own home only.
+async function checkExtraHomes(ctx) {
+  const entries = ctx.config.homes || [];
+  if (!entries.length) return null;
+
+  const homes = expandHomes(entries);
+  const lines = [];
+  const problems = [];
+  for (const { home, project } of homes) {
+    if (!isDirectory(home)) {
+      problems.push(`not found: ${home}`);
+      continue;
+    }
+    const parts = [];
+
+    if (ctx.ccEnabled) {
+      let transcripts = [];
+      try {
+        transcripts = await listTranscripts(homeInputPath("claude-code", home));
+      } catch (err) {
+        problems.push(`cannot list transcripts of ${home}: ${err.message}`);
+      }
+      const read = transcripts.filter((t) => fileInHome(home, t));
+      for (const t of transcripts) {
+        if (!read.includes(t)) problems.push(`skipped, not a file inside its home: ${t}`);
+      }
+      parts.push(`${read.length} transcripts`);
+    }
+
+    if (ctx.ocEnabled) {
+      const dbPath = homeInputPath("opencode", home);
+      if (!isPresent(dbPath)) {
+        parts.push("no opencode db");
+      } else if (!databaseInHome(home, dbPath)) {
+        problems.push(`skipped, not a file inside its home: ${dbPath}`);
+      } else {
+        try {
+          const db = new DatabaseSync(dbPath, { readOnly: true });
+          try {
+            parts.push(`${db.prepare("SELECT COUNT(*) c FROM message").get().c} opencode messages`);
+          } finally {
+            db.close();
+          }
+        } catch (err) {
+          problems.push(`cannot read ${dbPath}: ${err.message}`);
+        }
+      }
+    }
+
+    lines.push(`${tildify(home)} → ${tildify(project)} (${parts.join(", ") || "nothing enabled"})`);
+  }
+
+  return {
+    ok: problems.length === 0,
+    detail:
+      `${homes.length} home${homes.length === 1 ? "" : "s"}` +
+      (lines.length ? `: ${lines.join("; ")}` : "") +
+      (problems.length ? ` — ${problems.join("; ")}` : ""),
+  };
+}
+
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// Whether a directory entry is there at all, a dangling symlink included.
+function isPresent(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // --- helpers -------------------------------------------------------------

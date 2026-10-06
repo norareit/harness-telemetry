@@ -19,6 +19,9 @@ independent — the archive is written even with no network, and a backlog drain
                                    Grafana dashboard
 ```
 
+The two harness paths are those of the user who runs the agent. The same two are read under every directory listed in
+`homes` ([extra homes](#extra-homes)), for harnesses that run with another home, such as one in a container.
+
 ## Layout
 
 | Path | What |
@@ -222,6 +225,43 @@ for a healthy run — it once was, silently, for 13 hours (plans/007):
 The systemd unit keeps `SuccessExitStatus=0 3` (a queued-offline run is a success); the wrapper reserves `127` and now
 aborts to it via an `EXIT` trap, so a launch failure shows as `Failed`, not the whitelisted `3`.
 
+### Extra homes
+
+The agent reads the Claude Code transcripts and the OpenCode database of the user who runs it (`sources`). A harness
+that runs with another home is invisible to it: one in a container whose home is mounted from the host, one under a
+second `CLAUDE_CONFIG_DIR`, a home directory synced from another machine. List such directories under `homes` in
+`config.json`:
+
+```json
+"homes": [
+  { "home": "~/.local/share/agentrite/*" },
+  { "home": "~/backup/laptop-home", "project": "~/projects/finrite" }
+]
+```
+
+* `home` is a directory laid out like a user's home. `~` is expanded, and a path segment that is exactly `*` matches
+  every directory at that level (a symlink to a directory is not matched). There is no other wildcard syntax.
+* Under each one the agent reads `.claude/projects` and `.local/share/opencode/opencode.db`. A missing one is skipped.
+* Every event from a home is filed under `project`: the working directory recorded in such a home is a path inside a
+  container (`/work`, say) and means nothing on this device. `~` is expanded, so `project` can be the real path of the
+  project here, which makes the rows identical to those of sessions run on the host. Without it, the home directory's
+  own name is used: a home directory called `norareit` gives `norareit`.
+* `sources.<harness>.enabled` and `.billing` apply to the homes too. `device` is the device that runs the agent.
+* A directory reached twice (two entries that match it, or a home that is the device's own) is read once. The device's
+  own input wins, then the first entry.
+
+The first example is where an AgentRite sandbox writes each project's harness logs. The feature itself knows nothing
+about AgentRite.
+
+A home may be written by a sandboxed agent, so its content is treated as untrusted. A file is read from a home only
+when it really is in that home: its real path, with every symlink followed, must lie under the home's, and it must be
+a regular file. A symlink is the one way a sandbox can make the agent read a file it cannot touch itself, such as your
+own transcripts or another home's database, and reading those through the link would re-file real events under the
+home's name. What is skipped for this reason is reported by `doctor`'s "extra homes" check. Two limits remain. The
+check and the read are two steps, so a sandbox running during a sync could swap a file in between. And the event key
+has no project in it, so a home that presents the session id and message id of an existing event overwrites that
+event; the ids are not guessable.
+
 ### Scheduling
 
 **desktop (Linux) — systemd user timer:**
@@ -273,6 +313,10 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
 * **claude-code dedupe regression** — deduped vs naive output / cache-creation totals; the naive sum must stay ≥1.5× the
   deduped one (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0), and 0 usage conflicts within a `requestId`
 * **opencode db / opencode reconciliation** — the DB opens; per-message token sums match the `session` rollup columns
+* **extra homes** — each directory the `homes` entries resolve to, with its project, transcript count and OpenCode
+  message count. Fails when an entry without `*` does not exist, when a database is there and cannot be read, or when a
+  transcript or database was skipped because it is not a file inside its home (the file is named). Absent without
+  `homes`. The checks above and "models priced" keep reading the device's own home only.
 * **price table** — loads, model count
 * **reasoning tokens billed** — 1M reasoning tokens cost the full output rate (the permanent guard against the
   reasoning-exclusion regression)
@@ -473,6 +517,12 @@ value, and a `.git` at or above `$HOME` is ignored so a dotfiles repo cannot swa
 behaviour). Events recorded before this was introduced keep their old subdirectory value until repaired in place with
 `node agent/scripts/reroot-project.mjs` (run per device — it walks that machine's filesystem; `doctor`'s "projects are
 repo roots" check flags what still needs it).
+
+An event read from an [extra home](#extra-homes) is the exception: its `project` is what the `homes` entry says, a
+name such as `norareit` unless the entry gives a path. A name is left alone by the repository-root rule and by
+`reroot-project.mjs`. The dashboard shows the last path segment of `project`, so `norareit` and
+`~/projects/norareit` appear as one project in every panel that groups by that; the scenario table groups by the raw
+value and shows the two separately.
 
 #### Splitting one repo into several projects — `.harness-split`
 

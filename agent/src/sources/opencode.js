@@ -1,4 +1,5 @@
-// OpenCode source — reads ~/.local/share/opencode/opencode.db (SQLite).
+// OpenCode source — reads ~/.local/share/opencode/opencode.db (SQLite), and the
+// same file under each extra home (plans/018).
 //
 // Opened READ-ONLY (`{ readOnly: true }`); SQLite readers do not block writers,
 // so this is safe against a running OpenCode (verified against the live DB, 984
@@ -24,44 +25,65 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { expandHome } from "../config.js";
+import { databaseInHome, inputsFor } from "../homes.js";
 import { projectRootOf } from "../project.js";
 
 const HARNESS = "opencode";
 const WATERMARK_KEY = "watermark:opencode:time_updated";
 
 export async function* extractOpenCode({ store, config, full = false }) {
-  const dbPath = expandHome(
-    config.sources.opencode.db || "~/.local/share/opencode/opencode.db",
-  );
+  // plans/018: the device's own database, then one per extra home.
+  for (const input of inputsFor(HARNESS, config)) {
+    yield* extractDatabase({ store, config, full, input });
+  }
+}
+
+async function* extractDatabase({ store, config, full, input }) {
+  // A home's content is untrusted (plans/018): its database is opened only
+  // when it, and any -wal/-shm beside it, really are files inside the home.
+  if (input.home && !databaseInHome(input.home, input.path)) return;
+
+  // The watermark is per database. The device's own keeps the original key, so
+  // nothing is re-read after an upgrade.
+  const watermarkKey = input.home ? `${WATERMARK_KEY}:${input.path}` : WATERMARK_KEY;
 
   let db;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
+    db = new DatabaseSync(input.path, { readOnly: true });
   } catch (err) {
     if (err.code === "ERR_SQLITE_ERROR" || err.code === "ENOENT") return;
     throw err;
   }
 
   try {
-    const since = full ? 0 : Number(store.getKV(WATERMARK_KEY) || 0);
+    const since = full ? 0 : Number(store.getKV(watermarkKey) || 0);
 
-    const rows = db
-      .prepare(
-        `SELECT
-           m.id           AS message_id,
-           m.session_id   AS session_id,
-           m.time_updated AS time_updated,
-           m.data         AS data,
-           s.directory    AS session_dir,
-           s.parent_id    AS parent_id,
-           w.branch       AS branch
-         FROM message m
-         JOIN session s ON s.id = m.session_id
-         LEFT JOIN workspace w ON w.id = s.workspace_id
-         WHERE m.time_updated >= ?
-         ORDER BY m.time_updated ASC`,
-      )
-      .all(since);
+    let rows;
+    try {
+      rows = db
+        .prepare(
+          `SELECT
+             m.id           AS message_id,
+             m.session_id   AS session_id,
+             m.time_updated AS time_updated,
+             m.data         AS data,
+             s.directory    AS session_dir,
+             s.parent_id    AS parent_id,
+             w.branch       AS branch
+           FROM message m
+           JOIN session s ON s.id = m.session_id
+           LEFT JOIN workspace w ON w.id = s.workspace_id
+           WHERE m.time_updated >= ?
+           ORDER BY m.time_updated ASC`,
+        )
+        .all(since);
+    } catch (err) {
+      // A home's database that is not an OpenCode database (or not a database
+      // at all) is skipped, and the other inputs are still read. The device's
+      // own failing here is a real fault and stays loud.
+      if (input.home && err.code === "ERR_SQLITE_ERROR") return;
+      throw err;
+    }
 
     // plans/008: same repository-root rule as Claude Code, applied here where
     // `config` is available. See extractClaudeCode for why not inside toEvent.
@@ -71,12 +93,13 @@ export async function* extractOpenCode({ store, config, full = false }) {
       maxWatermark = Math.max(maxWatermark, row.time_updated);
       const ev = toEvent(row);
       if (ev) {
-        if (detectRoot) ev.project = projectRootOf(ev.project);
+        if (input.home) ev.project = input.project;
+        else if (detectRoot) ev.project = projectRootOf(ev.project);
         yield ev;
       }
     }
 
-    if (maxWatermark > since) store.setKV(WATERMARK_KEY, maxWatermark);
+    if (maxWatermark > since) store.setKV(watermarkKey, maxWatermark);
   } finally {
     db.close();
   }

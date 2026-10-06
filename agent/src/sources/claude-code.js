@@ -1,4 +1,5 @@
-// Claude Code source — walks ~/.claude/projects/<slug>/<session>.jsonl.
+// Claude Code source — walks ~/.claude/projects/<slug>/<session>.jsonl, and the
+// same tree under each extra home (plans/018).
 //
 // The transcripts are append-only, so each file is resumed from a stored
 // (inode, byte offset) cursor. We only read whole lines: the byte offset is
@@ -19,24 +20,43 @@ import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { expandHome } from "../config.js";
+import { fileInHome, inputsFor } from "../homes.js";
 import { projectRootOf } from "../project.js";
 
 const HARNESS = "claude-code";
 
 export async function* extractClaudeCode({ store, config, full = false }) {
-  const root = expandHome(config.sources["claude-code"].root || "~/.claude/projects");
   // plans/008: file each event under the repository root of its cwd. Applied
   // here, where `config` is in hand, rather than inside parseRecord (which is
   // pure and shared with doctor). projectRootOf is a no-op when the path has no
   // .git ancestor, so pre-008 behaviour is the fallback.
   const detectRoot = config.project?.detectRoot !== false;
-  for (const path of await listTranscripts(root)) {
-    for await (const ev of readFileIncremental({ store, path, full })) {
-      if (detectRoot) ev.project = projectRootOf(ev.project);
-      yield ev;
+  // plans/018: the device's own projects root, then one per extra home.
+  for (const input of inputsFor(HARNESS, config)) {
+    for (const path of await transcriptsOf(input)) {
+      for await (const ev of readFileIncremental({ store, path, full })) {
+        // An event from a home is filed under the home's project: its cwd is a
+        // path inside a container and means nothing on this device.
+        if (input.home) ev.project = input.project;
+        else if (detectRoot) ev.project = projectRootOf(ev.project);
+        yield ev;
+      }
     }
   }
+}
+
+// The transcripts to read for one input. A home's content is untrusted
+// (plans/018): only regular files that really are inside the home are read, and
+// a projects root that cannot be listed is skipped rather than failing the sync.
+async function transcriptsOf(input) {
+  if (!input.home) return listTranscripts(input.path);
+  let paths;
+  try {
+    paths = await listTranscripts(input.path);
+  } catch {
+    return [];
+  }
+  return paths.filter((path) => fileInHome(input.home, path));
 }
 
 /**

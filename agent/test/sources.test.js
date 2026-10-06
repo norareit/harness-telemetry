@@ -2,7 +2,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync, renameSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -314,4 +314,116 @@ test("OC: project resolves a subdirectory session directory to the repository ro
   });
   const events = await collect(_oc({ store: ocStore(), config: { sources: { opencode: { db: path } } }, full: true }));
   assert.equal(events[0].project, repo);
+});
+
+// --- extra homes (plans/018) -----------------------------------------------
+
+// A device with its own Claude Code root, plus one extra home `homes/norareit`
+// whose transcript was written in a container (cwd /work/sub).
+function homeScratch() {
+  const s = ccScratch();
+  const home = join(s.dir, "homes", "norareit");
+  const slug = join(home, ".claude", "projects", "-work");
+  mkdirSync(slug, { recursive: true });
+  const lines = (recs) => recs.map((r) => JSON.stringify(r)).join("\n") + "\n";
+  const inHome = assistant({ requestId: "h1", sessionId: "hs", cwd: "/work/sub" });
+  writeFileSync(join(slug, "hs.jsonl"), lines([inHome]));
+  const config = { ...s.config, homes: [{ home: join(s.dir, "homes", "*") }] };
+  return { ...s, home, slug, lines, config };
+}
+
+test("CC: a home's events get the home's project; the device's own still resolve by cwd", async () => {
+  const { repo, sub } = tempRepo();
+  const s = homeScratch();
+  s.writeLines([assistant({ cwd: sub })]);
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }));
+  assert.deepEqual(events.map((e) => [e.message_id, e.project]), [["r1", repo], ["h1", "norareit"]]);
+  assert.equal(events[1].git_branch, "main");
+
+  const again = await collect(extractClaudeCode({ store: s.store, config: s.config, full: false }));
+  assert.equal(again.length, 0, "a second run reads nothing new from the home");
+});
+
+test("CC: a home's project override is used as given, with detectRoot off as well", async () => {
+  const s = homeScratch();
+  const config = { ...s.config, homes: [{ home: s.home, project: "/real/path" }], project: { detectRoot: false } };
+  const events = await collect(extractClaudeCode({ store: s.store, config, full: true }));
+  assert.deepEqual(events.map((e) => e.project), ["/real/path"]);
+});
+
+test("CC: in a home, a transcript that is a symlink to one outside it is skipped", async () => {
+  const s = homeScratch();
+  // The device's own transcript, reached through a link in the home, must not
+  // be re-filed under the home's name.
+  s.writeLines([assistant()]);
+  symlinkSync(s.path, join(s.slug, "stolen.jsonl"));
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => [e.message_id, e.project]), [["r1", "/p"], ["h1", "norareit"]]);
+});
+
+test("CC: in a home whose .claude is a symlink to a tree outside it, every transcript is skipped", async () => {
+  const s = homeScratch();
+  const elsewhere = join(s.dir, "elsewhere");
+  renameSync(join(s.home, ".claude"), elsewhere);
+  symlinkSync(elsewhere, join(s.home, ".claude"));
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events, []);
+});
+
+test("CC: a home whose projects root is not a directory does not fail the run", async () => {
+  const s = homeScratch();
+  rmSync(join(s.home, ".claude", "projects"), { recursive: true });
+  writeFileSync(join(s.home, ".claude", "projects"), "");
+  s.writeLines([assistant()]);
+  const events = await collect(extractClaudeCode({ store: s.store, config: s.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["r1"]);
+});
+
+// The device's own database plus one in a home, each with an old and a newer row.
+function ocHomes() {
+  const dir = mkTmp();
+  const rows = (prefix, directory) => ({
+    sessions: [{ id: `${prefix}-sess`, directory }],
+    messages: [
+      { id: `${prefix}-old`, session_id: `${prefix}-sess`, time_updated: 100, data: ocData() },
+      { id: `${prefix}-new`, session_id: `${prefix}-sess`, time_updated: 200, data: ocData() },
+    ],
+  });
+  const own = ocDb(rows("own", "/proj"));
+  const inHome = ocDb(rows("home", "/work"));
+  const home = join(dir, "homes", "norareit");
+  const homeDb = join(home, ".local", "share", "opencode", "opencode.db");
+  mkdirSync(join(home, ".local", "share", "opencode"), { recursive: true });
+  const config = { sources: { opencode: { db: own.path } }, homes: [{ home }] };
+  return { dir, own, inHome, home, homeDb, config };
+}
+
+test("OC: a home's database is read under the home's project, with a watermark of its own", async () => {
+  const f = ocHomes();
+  renameSync(f.inHome.path, f.homeDb);
+  const store = ocStore();
+  const first = await collect(_oc({ store, config: f.config, full: false }));
+  assert.deepEqual(
+    first.map((e) => [e.message_id, e.project]),
+    [["own-old", "/proj"], ["own-new", "/proj"], ["home-old", "norareit"], ["home-new", "norareit"]],
+  );
+  assert.equal(Number(store.getKV("watermark:opencode:time_updated")), 200);
+  assert.equal(Number(store.getKV(`watermark:opencode:time_updated:${f.homeDb}`)), 200);
+
+  const second = await collect(_oc({ store, config: f.config, full: false }));
+  assert.deepEqual(second.map((e) => e.message_id), ["own-new", "home-new"]);
+});
+
+test("OC: a home whose opencode.db is a symlink to a database outside it yields nothing", async () => {
+  const f = ocHomes();
+  symlinkSync(f.inHome.path, f.homeDb);
+  const events = await collect(_oc({ store: ocStore(), config: f.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new"]);
+});
+
+test("OC: a home's file that is not an OpenCode database is skipped, the others are read", async () => {
+  const f = ocHomes();
+  writeFileSync(f.homeDb, "not a database, but long enough to be read as one".repeat(4));
+  const events = await collect(_oc({ store: ocStore(), config: f.config, full: true }));
+  assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new"]);
 });

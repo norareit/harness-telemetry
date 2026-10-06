@@ -218,6 +218,15 @@ test("null / falsy input is returned unchanged", () => {
   assert.equal(projectRootOf(""), "");
 });
 
+test("a non-absolute value (a project name, plans/018) is returned unchanged without touching the fs", () => {
+  let calls = 0;
+  const spy = { statSync: () => { calls++; throw new Error("no fs"); }, readFileSync: () => { calls++; return ""; } };
+  assert.equal(projectRootOf("norareit", { fs: spy }), "norareit");
+  assert.equal(projectRootOf("some/name", { fs: spy }), "some/name");
+  assert.equal(calls, 0);
+  assert.equal(projectRootOf.cache.has("norareit"), false);
+});
+
 test("memoisation: a second call with the same input does not touch the fs", () => {
   const t = tree();
   const inner = t.mk("repo", "a");

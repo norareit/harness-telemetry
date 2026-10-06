@@ -2,8 +2,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { redactDsn, overrideDrift, CHECKS, CHECK_NAMES } from "../src/doctor.js";
 import { Pricing } from "../src/pricing.js";
@@ -53,8 +54,8 @@ test("overrideDrift flags a pin that has drifted from the table", () => {
 
 // --- checks as a registry (plan 006 Move 3) --------------------------------
 
-test("CHECK_NAMES lists the 20 checks in order", () => {
-  assert.equal(CHECK_NAMES.length, 20);
+test("CHECK_NAMES lists the 21 checks in order", () => {
+  assert.equal(CHECK_NAMES.length, 21);
   assert.equal(CHECK_NAMES[0], "config file");
   assert.equal(CHECK_NAMES.at(-1), "projects are repo roots");
   assert.equal(CHECK_NAMES.at(-4), "postgres schema");
@@ -230,4 +231,64 @@ test("check 'projects are repo roots': ok when all are roots, skipped when detec
   assert.equal(ok.ok, true);
   assert.match(ok.detail, /distinct projects, all repository roots/);
   assert.equal(check("projects are repo roots")({ config: { project: { detectRoot: false } }, store }), null);
+});
+
+// --- extra homes (plans/018) -----------------------------------------------
+
+// A directory holding one home (`homes/norareit`) with a transcript and an
+// OpenCode database, and an `outside` directory a symlink can point at.
+function homeFixture(t) {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, "homes", "norareit");
+  const slug = join(home, ".claude", "projects", "-work");
+  const ocDir = join(home, ".local", "share", "opencode");
+  mkdirSync(slug, { recursive: true });
+  mkdirSync(ocDir, { recursive: true });
+  mkdirSync(join(dir, "outside"));
+  writeFileSync(join(slug, "s1.jsonl"), "{}\n");
+  const db = new DatabaseSync(join(ocDir, "opencode.db"));
+  db.exec("CREATE TABLE message (id TEXT); INSERT INTO message VALUES ('m1'), ('m2');");
+  db.close();
+  const ctx = (homes) => ({ config: { homes }, ccEnabled: true, ocEnabled: true });
+  return { dir, home, slug, ocDir, ctx };
+}
+
+test("check 'extra homes': absent without homes, lists a home and its project", async (t) => {
+  const f = homeFixture(t);
+  assert.equal(await check("extra homes")(f.ctx([])), null);
+
+  const r = await check("extra homes")(f.ctx([{ home: join(f.dir, "homes", "*") }]));
+  assert.equal(r.ok, true);
+  assert.match(r.detail, /^1 home: .*norareit → norareit \(1 transcripts, 2 opencode messages\)$/);
+});
+
+test("check 'extra homes': a missing entry fails, a wildcard that matches nothing passes", async (t) => {
+  const f = homeFixture(t);
+  const missing = await check("extra homes")(f.ctx([{ home: join(f.dir, "nope") }]));
+  assert.equal(missing.ok, false);
+  assert.match(missing.detail, /not found: .*nope/);
+
+  const none = await check("extra homes")(f.ctx([{ home: join(f.dir, "outside", "*") }]));
+  assert.equal(none.ok, true);
+  assert.equal(none.detail, "0 homes");
+});
+
+test("check 'extra homes': a database that cannot be read fails", async (t) => {
+  const f = homeFixture(t);
+  writeFileSync(join(f.ocDir, "opencode.db"), "not a database, but long enough to be read as one".repeat(4));
+  const r = await check("extra homes")(f.ctx([{ home: f.home }]));
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /cannot read .*opencode\.db/);
+});
+
+test("check 'extra homes': a file that is not inside its home fails and is named", async (t) => {
+  const f = homeFixture(t);
+  const real = join(f.dir, "outside", "real.jsonl");
+  writeFileSync(real, "{}\n");
+  symlinkSync(real, join(f.slug, "s2.jsonl"));
+  const r = await check("extra homes")(f.ctx([{ home: f.home }]));
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /1 transcripts/);
+  assert.match(r.detail, /skipped, not a file inside its home: .*s2\.jsonl/);
 });

@@ -40,6 +40,10 @@ const DEFAULTS = {
     modelsJson: "~/.cache/opencode/models.json",
     overrides: null, // defaults to bundled pricing-overrides.json
   },
+  // Extra homes (plans/018): directories laid out like a user's home whose
+  // harness files are read as well, e.g. the home of a container. Each entry
+  // is { home, project? }; see homes.js.
+  homes: [],
   // Project identity (plans/008). true = file each event under the nearest
   // `.git` ancestor of its working directory (so subdirectories of one repo
   // collapse into it); false = the working directory itself (pre-plan-008).
