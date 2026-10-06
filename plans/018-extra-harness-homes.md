@@ -12,8 +12,14 @@ Status: **implemented** (2026-10-06), the findings of three reviews fixed (see "
   an explicit `project` per home: `sync --no-ship` extracted 155 Claude Code and 74 OpenCode events, filed under
   `/home/stef/projects/norareit` (153 and 73) and `/home/stef/projects/agentrite`; `doctor` passed "extra homes".
 
-Not verified: the device's real config with a `homes` entry, shipping these events to the real database and the
-dashboard (verification steps 2 to 4 on live data), and step 5 (the Mac).
+- On desktop, live (2026-10-06, verification steps 2 to 4): the four volumes were copied to
+  `~/.local/share/harness-backlog/<volume>` and listed under `homes` with an explicit `project` each. `doctor`
+  passed "extra homes" with all four, `sync` shipped with 0 events left unsynced, and the dashboard showed the
+  norareit and agentrite totals grown. The local store holds no project `/work` and no project that is a bare
+  name. The entries were removed from the config afterwards: the sandboxes stay unused until AgentRite's unit
+  `0035` is in place, after which `{ "home": "~/.local/share/agentrite/*" }` is the entry to add.
+
+Not verified: step 5 (the Mac).
 
 Builds on 001–017.
 
