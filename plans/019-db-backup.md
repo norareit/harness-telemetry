@@ -12,7 +12,12 @@ Status: **implemented** (2026-10-23). Verified:
 - `harness-usage pull-backup` through the wrapper, with a local directory as `source`: pulls both dumps, pulls
   nothing the second time, and `doctor --only "last backup"` passes. Without `source` it exits 2 and names it.
 
-Not verified yet: a pull over SSH from a real server (verification steps 4 to 6), and the catch-up at login.
+- Live (2026-10-23): the server's timer is enabled and a manual run wrote a 5 MB dump. On a client,
+  `pull-backup` fetched it over SSH as `pi@rpi5` (key with a passphrase, held by the GNOME keyring agent; the
+  service environment can use it), `doctor` passes "last backup", and the pull timer's next elapse is shown.
+
+Not verified yet: the restore test against the live database (verification step 4), and the catch-up at login
+(step 6).
 
 Terms: the **server** is the machine running the stack in `server/docker-compose.yml`. A **client** is any other
 machine that pulls dumps from it, usually a device that also runs the agent.
