@@ -9,7 +9,7 @@
 -- Safe to re-run: every statement is idempotent.
 -- Non-destructive: ADD COLUMN with no default rewrites no rows in PG 11+.
 --
--- Apply on the Pi:
+-- Apply on the server:
 --   docker compose exec -T postgres psql -U harness -d harness \
 --     < server/postgres/migrations/001-add-rates.sql
 --

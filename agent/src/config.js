@@ -50,7 +50,7 @@ const DEFAULTS = {
   project: { detectRoot: true },
   // Liveness (plans/007). doctor's "last sync" / "last ship" checks fail once
   // the agent has not run to completion within this many minutes. 60 is
-  // generous against desktop's 5-minute timer; a laptop that sleeps overnight
+  // generous against the 5-minute timer; a laptop that sleeps overnight
   // wants a larger value (or legitimately fails doctor the next morning).
   sync: { staleAfterMinutes: 60 },
   // Counterfactual targets materialized into Postgres for the dashboard

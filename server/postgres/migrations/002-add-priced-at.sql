@@ -17,7 +17,7 @@
 --
 -- Safe to re-run. Non-destructive: ADD COLUMN with no default rewrites no rows.
 --
--- Apply on the Pi:
+-- Apply on the server:
 --   docker compose exec -T postgres psql -U harness -d harness \
 --     < server/postgres/migrations/002-add-priced-at.sql
 

@@ -4,17 +4,17 @@ Per-session token usage and (potential) cost for **Claude Code** and **OpenCode*
 dashboard — while keeping a readable, parseable copy of the data on each device.
 
 Local-first: a short-lived per-device agent reads each harness's own on-disk state, normalizes it, writes a local JSONL
-archive, and upserts to Postgres on the Pi over Tailscale. Grafana queries Postgres. Extraction and shipping are
+archive, and upserts to Postgres on a server over Tailscale. Grafana queries Postgres. Extraction and shipping are
 independent — the archive is written even with no network, and a backlog drains on the next run.
 
 ```
-                 ┌──────────── desktop / laptop ────────────┐
+                 ┌────────────── each device ───────────────┐
   ~/.claude/projects/**/*.jsonl ─┐                             │
   ~/.local/share/opencode.db  ───┤─▶ harness-usage (agent) ────┼─▶ ~/.local/share/harness-usage/
   ~/.cache/opencode/models.json ─┘         │  every 5 min      │       events/YYYY-MM-DD.jsonl
                                            │                   │       state.sqlite (cursors + outbox)
                                            ▼                   │
-                              Postgres 17 on rpi5         ◀────┘   (Tailscale, idempotent upsert)
+                              Postgres 17 on the server   ◀────┘   (Tailscale, idempotent upsert)
                                            ▼
                                    Grafana dashboard
 ```
@@ -28,7 +28,7 @@ The two harness paths are those of the user who runs the agent. The same two are
 |---|---|
 | `agent/` | the per-device sync agent (Node ≥22.13, one dependency: `pg`) |
 | `agent/scripts/` | one-off repairs for already-recorded state — see its README |
-| `server/` | `docker compose` stack for the Pi: Postgres + Grafana, provisioned |
+| `server/` | `docker compose` stack for the server: Postgres + Grafana, provisioned |
 | `agent/test/` | `node --test` suite: `npm test` (no dependency, no network, no home access) |
 | `plans/` | the design and the research behind it — 001 (pipeline) → 006 (structure), each self-contained |
 
@@ -267,7 +267,7 @@ event; the ids are not guessable.
 
 ### Scheduling
 
-**desktop (Linux) — systemd user timer:**
+**Linux — systemd user timer:**
 
 ```sh
 mkdir -p ~/.config/systemd/user
@@ -285,7 +285,7 @@ fires if login is later than that; plan 012), then every 5 minutes. After updati
 session (`Linger=no`). That is fine: new data only appears while someone is logged in using the harnesses, and
 anything missed self-heals on the next run. Run `sudo loginctl enable-linger $USER` only if headless operation is ever wanted.
 
-**laptop (macOS) — launchd LaunchAgent:**
+**macOS — launchd LaunchAgent:**
 
 The shipped plist has `/Users/USER` placeholders in its program and log paths, so it does not work verbatim — fill them
 in while copying (and adjust the repo path if it is not `~/projects/harness-telemetry`):
@@ -372,8 +372,8 @@ two were individually correct and jointly wrong: Anthropic thinking tokens were 
 by $25.41. `usage_cost_audit` now recomputes with `(output_tokens + reasoning_tokens)` in SQL, so the regression cannot
 come back unnoticed.
 
-`billing` is `free` (subscription — Stef's Max / OpenCode auth), `api` (paid per token), or `local` (`ollama`/`lmstudio`
-and friends, genuinely $0). Set per source in `config.json`.
+`billing` is `free` (a subscription, such as a Claude Max plan or OpenCode auth), `api` (paid per token), or `local`
+(`ollama`/`lmstudio` and friends, genuinely $0). Set per source in `config.json`.
 
 ### Stored rates and the cost audit
 
@@ -441,15 +441,16 @@ The agent fetching the catalogue itself would remove this dependency; that is no
 
 ---
 
-## Pi stack (you deploy this)
+## Server stack (you deploy this)
 
-On `rpi5`, with Docker + compose installed:
+On the server, with Docker + compose installed. Both images are multi-arch, so a Raspberry Pi (arm64) works as
+well as an amd64 machine:
 
 ```sh
 cd server
 cp .env.example .env
 $EDITOR .env        # set POSTGRES_PASSWORD, GRAFANA_ADMIN_PASSWORD;
-                    # TAILSCALE_IP defaults to rpi5's 100.x.y.z (`tailscale ip -4`)
+                    # TAILSCALE_IP: the server's Tailscale IP (`tailscale ip -4`)
 docker compose up -d
 docker compose ps
 docker compose logs -f grafana
@@ -472,14 +473,14 @@ docker compose logs -f grafana
   so it comes up populated. The top row's **Minutes since last ship, per device** stat (green/orange/red on 30/180 min)
   ignores the time range and `$device` so a silent device stays visible; it is the glanceable companion to `doctor`'s
   authoritative `last sync`/`last ship` checks.
-* Both ports are published on `${TAILSCALE_IP}` only — not the LAN, not the internet. Open `http://rpi5:3000` from any
-  tailnet device.
+* Both ports are published on `${TAILSCALE_IP}` only — not the LAN, not the internet. Open `http://<server>:3000`
+  from any tailnet device.
 
 Verify the binding is tailnet-only:
 
 ```sh
 ss -tlnp | grep -E ':3000|:5432'          # should show 100.x.y.z, not 0.0.0.0
-curl -sS --max-time 3 http://<pi-LAN-ip>:3000 && echo REACHABLE || echo "blocked (good)"
+curl -sS --max-time 3 http://<server-LAN-ip>:3000 && echo REACHABLE || echo "blocked (good)"
 ```
 
 ### Point an agent at it
@@ -560,7 +561,7 @@ The fine print, because this is finicky:
 Local readable copy: `~/.local/share/harness-usage/events/YYYY-MM-DD.jsonl`, one object per line. `state.sqlite`
 alongside holds the sync cursors and the unsynced outbox. Claude Code prunes its own transcripts after ~30 days, so the
 JSONL archive is the only durable history past that window — which is why extraction runs and archives regardless of
-whether the Pi is reachable.
+whether the server is reachable.
 
 If `state.sqlite` is ever lost, recovery is two steps, in this order:
 

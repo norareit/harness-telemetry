@@ -1,8 +1,8 @@
-# Pi stack: Postgres (the store Grafana queries) + Grafana (dashboards as code).
-# Both images are multi-arch and run on the Pi's arm64.
+# Server stack: Postgres (the store Grafana queries) + Grafana (dashboards as code).
+# Both images are multi-arch: amd64 and arm64 (e.g. a Raspberry Pi).
 #
 # Ports are bound to the Tailscale IP ONLY (see TAILSCALE_IP in .env), so nothing
-# is exposed to the LAN or the internet. Reach Grafana at http://rpi5:3000
+# is exposed to the LAN or the internet. Reach Grafana at http://<server>:3000
 # from any tailnet device.
 
 name: harness-telemetry
