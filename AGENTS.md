@@ -19,6 +19,11 @@
 
 - Maximum line length is **120 characters**, for Markdown (plans, README, this file) and code alike.
 - Existing longer lines are grandfathered: wrap a line when you change it, but don't reformat untouched code.
+- The project is public. In plans, README and code, name machines by role (**server**, **client**/**device**), not by
+  the maintainer's host names or hardware. Site-specific values (hosts, paths, times) are config or examples, never
+  defaults.
+  - A plan's `Status:` line may name the machine where something was verified: it records what happened.
+  - Older plans are left as they are.
 
 ## Code
 
