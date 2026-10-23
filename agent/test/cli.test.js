@@ -244,3 +244,13 @@ test("13: launcher aborts to 127, never an agent code, when it cannot start (pla
   assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /usage|sync|backfill/i);
 });
+
+// plans/019: pulling backups is opt-in, and an unset source says what to set.
+test("14: pull-backup without backup.source exits 2 and names the setting", (t) => {
+  const s = scratch();
+  t.after(s.cleanup);
+  const r = s.run("pull-backup");
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /backup\.source/);
+  assert.match(r.stderr, /config\.json/);
+});

@@ -1,0 +1,19 @@
+[Unit]
+Description=Pull the harness telemetry database dumps from the server
+Documentation=https://github.com/norareit/harness-telemetry
+After=network-online.target
+Wants=network-online.target
+# A run at login can come before the network (or Tailscale) is up. Retry every
+# 10 min, at most 6 starts in 3 h, then give up until the next day (plans/019).
+StartLimitIntervalSec=3h
+StartLimitBurst=6
+
+[Service]
+Type=oneshot
+# Invoke the wrapper, never `node` directly — see bin/harness-usage.
+# Adjust the path if the repo is not at ~/projects/harness-telemetry.
+# Needs backup.source in config.json; see the README, "Backups".
+ExecStart=%h/projects/harness-telemetry/agent/bin/harness-usage pull-backup
+Nice=10
+Restart=on-failure
+RestartSec=10min

@@ -1,0 +1,14 @@
+[Unit]
+Description=Dump the harness telemetry database nightly
+Documentation=https://github.com/norareit/harness-telemetry
+
+[Timer]
+# Local time. Persistent= runs a dump missed while the server was down as soon
+# as it is back. A user timer on a headless server needs
+# `loginctl enable-linger $USER`, or it never runs.
+OnCalendar=*-*-* 03:30
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -29,3 +29,25 @@ test("timer's first run is relative to the user manager's start, not kernel boot
   // Persistent= only affects OnCalendar=, so on its own it only suggests a catch-up that never happens.
   if (timer.Persistent) assert.ok(timer.OnCalendar, "Persistent= without OnCalendar= does nothing");
 });
+
+// plans/019: the backup timers run daily, and catch up a missed run when the timer next starts (the server after a
+// reboot, a client at the next login). That catch-up is what Persistent= does, and it needs OnCalendar=.
+for (const path of ["../install/harness-db-pull.timer", "../../server/backup/harness-db-backup.timer"]) {
+  test(`${path.split("/").at(-1)} runs daily and catches up a missed run`, () => {
+    const timer = section(path, "Timer");
+    assert.ok(timer.OnCalendar, "OnCalendar must schedule the run");
+    assert.match(timer.OnCalendar, /^\*-\*-\* \d\d:\d\d$/, "local time, no time zone suffix");
+    assert.equal(timer.Persistent, "true");
+    assert.equal(timer.OnBootSec, undefined);
+  });
+}
+
+test("the pull retries when the server is unreachable, a bounded number of times", () => {
+  const service = section("../install/harness-db-pull.service", "Service");
+  const unit = section("../install/harness-db-pull.service", "Unit");
+  assert.equal(service.Type, "oneshot");
+  assert.equal(service.Restart, "on-failure");
+  assert.ok(service.RestartSec, "RestartSec must space the retries");
+  assert.ok(unit.StartLimitIntervalSec && unit.StartLimitBurst, "the retries must be bounded");
+  assert.match(service.ExecStart, /\/agent\/bin\/harness-usage pull-backup$/, "through the wrapper, never node");
+});

@@ -23,6 +23,7 @@ import { reconcile, listModels, readHomeDatabase } from "./sources/opencode.js";
 import { parseRecord, providerOf, listTranscripts, countHomeEvents } from "./sources/claude-code.js";
 import { projectRootOf } from "./project.js";
 import { databaseInHome, expandHomes, fileInHome, homeInputPath } from "./homes.js";
+import { backupDir, newestDump } from "./backup.js";
 import { homedir } from "node:os";
 
 // Dedupe regression. The absolute totals drift up as the machine keeps being
@@ -61,6 +62,7 @@ export const CHECKS = [
   { name: "postgres schema", run: checkPostgresSchema },
   { name: "last sync", run: checkLastSync },
   { name: "last ship", run: checkLastShip },
+  { name: "last backup", run: checkLastBackup },
   { name: "projects are repo roots", run: checkProjectsAreRoots },
 ];
 
@@ -458,6 +460,29 @@ function stalenessCheck(ctx, key, absentHint) {
   return {
     ok: false,
     detail: `${age} (${when}) — exceeds sync.staleAfterMinutes=${threshold}; ${livenessHint()}`,
+  };
+}
+
+// plans/019: the newest pulled dump. Skipped on a device that doesn't pull
+// backups. A dump keeps the server's mtime through rsync -a, so this also
+// catches a server whose nightly dump stopped while the pull keeps succeeding.
+function checkLastBackup(ctx) {
+  const backup = ctx.config.backup;
+  if (!backup?.source) return null;
+  const dir = backupDir(ctx.config);
+  const newest = newestDump(dir);
+  if (!newest) return { ok: false, detail: `no dump in ${tildify(dir)} — run 'harness-usage pull-backup'` };
+
+  const threshold = backup.staleAfterHours ?? 48;
+  const ageH = (Date.now() - newest.mtimeMs) / 3600_000;
+  const detail = `${newest.name}, ${ageH.toFixed(1)} h old`;
+  if (ageH <= threshold) return { ok: true, detail };
+  return {
+    ok: false,
+    detail:
+      `${detail} — exceeds backup.staleAfterHours=${threshold}; run 'harness-usage pull-backup', check ` +
+      `'systemctl --user status harness-db-pull.service' / 'journalctl --user -u harness-db-pull', and the ` +
+      `server's harness-db-backup timer`,
   };
 }
 

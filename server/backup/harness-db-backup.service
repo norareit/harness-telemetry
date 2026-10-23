@@ -1,0 +1,10 @@
+[Unit]
+Description=Dump the harness telemetry database
+Documentation=https://github.com/norareit/harness-telemetry
+
+[Service]
+Type=oneshot
+# Adjust the path if the repo is not at ~/projects/harness-telemetry.
+# Writes to ~/backups/harness-telemetry; see backup.sh for the settings.
+ExecStart=%h/projects/harness-telemetry/server/backup/backup.sh
+Nice=10

@@ -1,7 +1,18 @@
 # Plan 019 — Daily Postgres backups, pulled by a client
 
 Type: **task**
-Status: **planned** (2026-10-23).
+Status: **implemented** (2026-10-23). Verified:
+
+- `npm test` (207 pass, also with an empty `HOME`). The new doctor, CLI and unit-file tests failed before the change.
+- `systemd-analyze --user verify` is clean for all four units; `bash -n` and shellcheck 0.10.0 are clean for
+  `backup.sh`.
+- `backup.sh` against a throwaway copy of the stack holding 500 rows: it writes a dump that `pg_restore --list`
+  reads (19 entries), prunes to `KEEP=2`, and with Postgres stopped exits 1 and leaves no `.tmp` file. Restoring
+  the dump into a scratch database gives the same `count(*)` and `sum(cost_usd)` as the source.
+- `harness-usage pull-backup` through the wrapper, with a local directory as `source`: pulls both dumps, pulls
+  nothing the second time, and `doctor --only "last backup"` passes. Without `source` it exits 2 and names it.
+
+Not verified yet: a pull over SSH from a real server (verification steps 4 to 6), and the catch-up at login.
 
 Terms: the **server** is the machine running the stack in `server/docker-compose.yml`. A **client** is any other
 machine that pulls dumps from it, usually a device that also runs the agent.

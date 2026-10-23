@@ -6,6 +6,7 @@
 //   show       print the local summary (totals, per-model, unsynced backlog)
 //   compare    counterfactual repricing against other models
 //   doctor     preflight + regression checks
+//   pull-backup  fetch the server's database dumps (plans/019)
 //
 // Short-lived: it wakes, syncs, exits. A missed run is harmless — the next one
 // just has more to do.
@@ -17,6 +18,7 @@ import { loadConfig, CONFIG_PATH } from "./config.js";
 import { loadPricing } from "./pricing.js";
 import { compare, GROUP_KEYS } from "./counterfactual.js";
 import { planRevaluation, applyRevaluation } from "./valuation.js";
+import { pullBackups } from "./backup.js";
 
 const [cmd, ...args] = process.argv.slice(2);
 const opts = parseArgs(args);
@@ -46,6 +48,9 @@ try {
       break;
     case "doctor":
       await cmdDoctor();
+      break;
+    case "pull-backup":
+      await cmdPullBackup();
       break;
     case "-h":
     case "--help":
@@ -446,6 +451,22 @@ async function cmdDoctor() {
   if (failed) process.exit(1);
 }
 
+async function cmdPullBackup() {
+  const config = await loadConfig();
+  if (!config.backup?.source) {
+    console.error(
+      `harness-usage pull-backup: backup.source is not set in ${config._path || CONFIG_PATH}.\n` +
+        `  Set it to the rsync source of the server's dumps, e.g.\n` +
+        `  "backup": { "source": "<server-host>:backups/harness-telemetry/" }`,
+    );
+    process.exit(2);
+  }
+  const r = pullBackups(config);
+  for (const name of r.pulled) console.log(`pulled  ${name}`);
+  for (const name of r.removed) console.log(`pruned  ${name}`);
+  console.log(`${r.pulled.length} pulled, newest ${r.newest ?? "(none)"} in ${r.dir}`);
+}
+
 function shorten(s, w) {
   return s.length <= w ? s : "…" + s.slice(-(w - 1));
 }
@@ -468,6 +489,7 @@ function usage() {
   restore-archive   reload the JSONL archive into the outbox (lost state.sqlite)
   reprice           deliberately re-value stored events (costs are frozen at ingest)
   doctor            preflight + regression checks
+  pull-backup       fetch the server's database dumps (backup.source)
 
   --no-ship         sync/backfill: write the local archive only, skip Postgres
 

@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -54,11 +54,12 @@ test("overrideDrift flags a pin that has drifted from the table", () => {
 
 // --- checks as a registry (plan 006 Move 3) --------------------------------
 
-test("CHECK_NAMES lists the 21 checks in order", () => {
-  assert.equal(CHECK_NAMES.length, 21);
+test("CHECK_NAMES lists the 22 checks in order", () => {
+  assert.equal(CHECK_NAMES.length, 22);
   assert.equal(CHECK_NAMES[0], "config file");
   assert.equal(CHECK_NAMES.at(-1), "projects are repo roots");
-  assert.equal(CHECK_NAMES.at(-4), "postgres schema");
+  assert.equal(CHECK_NAMES.at(-5), "postgres schema");
+  assert.equal(CHECK_NAMES.at(-2), "last backup");
 });
 
 test("check 'device name' is trivially ok", () => {
@@ -193,6 +194,52 @@ test("check 'last ship': reads its own key, fails when stale", () => {
   assert.equal(fresh.ok, true);
   const stale = check("last ship")(kvCtx({ "sync:last_ship_ok": epoch(2 * 3600_000) }));
   assert.equal(stale.ok, false);
+});
+
+// --- last backup (plans/019) -----------------------------------------------
+
+function backupCtx(t, { source = "server:backups/", staleAfterHours } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "harness-backup-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ctx = { config: { backup: { source, dir, ...(staleAfterHours ? { staleAfterHours } : {}) } } };
+  const dump = (name, hoursAgo) => {
+    const p = join(dir, name);
+    writeFileSync(p, "PGDMP");
+    const when = new Date(Date.now() - hoursAgo * 3600_000);
+    utimesSync(p, when, when);
+  };
+  return { ctx, dump };
+}
+
+test("check 'last backup': skipped (null) without backup.source", (t) => {
+  assert.equal(check("last backup")(backupCtx(t, { source: null }).ctx), null);
+  assert.equal(check("last backup")({ config: {} }), null);
+});
+
+test("check 'last backup': fails when no dump was pulled yet", (t) => {
+  const r = check("last backup")(backupCtx(t).ctx);
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /no dump in .* — run 'harness-usage pull-backup'/);
+});
+
+test("check 'last backup': judges the newest dump by its mtime", (t) => {
+  const { ctx, dump } = backupCtx(t);
+  dump("harness-telemetry-20261020T033000Z.dump", 70);
+  const stale = check("last backup")(ctx);
+  assert.equal(stale.ok, false);
+  assert.match(stale.detail, /20261020T033000Z.*70\.0 h old .* exceeds backup\.staleAfterHours=48/);
+  assert.match(stale.detail, /harness-db-pull/);
+
+  dump("harness-telemetry-20261022T033000Z.dump", 5);
+  const fresh = check("last backup")(ctx);
+  assert.equal(fresh.ok, true);
+  assert.match(fresh.detail, /20261022T033000Z\.dump, 5\.0 h old/);
+});
+
+test("check 'last backup': staleAfterHours is honoured", (t) => {
+  const { ctx, dump } = backupCtx(t, { staleAfterHours: 72 });
+  dump("harness-telemetry-20261020T033000Z.dump", 70);
+  assert.equal(check("last backup")(ctx).ok, true);
 });
 
 // --- projects are repo roots (plans/008) -----------------------------------

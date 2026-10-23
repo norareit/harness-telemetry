@@ -178,6 +178,7 @@ harness-usage sync        # incremental: extract → local archive → Postgres 
 harness-usage backfill    # ignore cursors, re-scan everything, drain the outbox
 harness-usage show        # local summary: totals, per-model cost, unsynced backlog
 harness-usage doctor      # preflight + regression checks (see below)
+harness-usage pull-backup # fetch the server's database dumps (see "Backups")
 
 harness-usage sync --no-ship   # write the local archive only, skip Postgres
 
@@ -337,6 +338,8 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
   left queued. Both fail past `sync.staleAfterMinutes` (default 60) with the `systemctl`/`journalctl` (or
   `launchctl`/log) hint; this is the check that catches a dead timer, since the outbox and Postgres freeze at the last
   good run and otherwise look healthy. "last ship" is skipped when no DSN is configured.
+* **last backup** — the newest pulled database dump is younger than `backup.staleAfterHours` (default 48). A dump keeps
+  the server's mtime, so this also catches a server that stopped dumping. Skipped without `backup.source`.
 * **projects are repo roots** — every stored `project` is a repository root, a `.harness-split` sub-project, or a
   genuine non-repository; a value that resolves to a different root on this machine is a pre-plan-008 subdirectory,
   repairable with `reroot-project.mjs`. Skipped when `project.detectRoot` is false.
@@ -492,6 +495,74 @@ In `~/.config/harness-usage/config.json`:
 ```
 
 then `harness-usage doctor` and `harness-usage backfill`.
+
+### Backups
+
+Most of the database can be rebuilt from the devices (`restore-archive` + `sync`), but not all of it: the cost of a
+row that was repriced (Postgres is authoritative for cost), anything fixed by hand in Postgres, and the history of a
+device that is gone. So the server dumps the database every night, and a client pulls the dumps, because a backup that
+stays on the server doesn't survive its disk.
+
+Both run on systemd timers that catch up a missed run: the server's dump as soon as it is back up, a client's pull at
+its next login. The server keeps 14 dumps, a client 60, so a client can be off for two weeks without missing one.
+
+**On the server.** `server/backup/backup.sh` writes `harness-telemetry-<UTC time>.dump` (`pg_dump -Fc`) to
+`~/backups/harness-telemetry`, checks it with `pg_restore --list`, and keeps the newest 14. Override with
+`HARNESS_BACKUP_DIR` / `HARNESS_BACKUP_KEEP`. Your user must be in the `docker` group.
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp server/backup/harness-db-backup.{service,timer} ~/.config/systemd/user/   # adjust ExecStart if not ~/projects/…
+sudo loginctl enable-linger $USER     # headless: run user timers without a login
+systemctl --user daemon-reload
+systemctl --user enable --now harness-db-backup.timer
+systemctl --user start harness-db-backup && journalctl --user -u harness-db-backup -n 5   # first dump now
+```
+
+The dump runs at 03:30 local time.
+
+**On a client.** It needs `rsync` on both machines and key-based SSH to the server that works without a prompt
+(`ssh -o BatchMode=yes <server-host> true`). In `~/.config/harness-usage/config.json`:
+
+```json
+"backup": { "source": "<server-host>:backups/harness-telemetry/" }
+```
+
+`source` is anything rsync accepts, so a `user@` or an alias from `~/.ssh/config` works. The dumps go to
+`~/.local/share/harness-usage/db-backups` (`backup.dir`), and the newest 60 are kept (`backup.keep`). Then:
+
+```sh
+harness-usage pull-backup             # first pull, by hand
+cp agent/install/harness-db-pull.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now harness-db-pull.timer
+```
+
+The pull runs at 11:30 local time, or at the next login if the client was off then. If the server is unreachable, it
+retries every 10 minutes, up to 6 times. To move it, run `systemctl --user edit harness-db-pull.timer` and add:
+
+```ini
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* 14:00
+```
+
+`doctor`'s **last backup** check fails when the newest dump is older than 48 hours (`backup.staleAfterHours`).
+On macOS, `pull-backup` and the check work the same, but there is no launchd job for it: schedule it yourself.
+
+**Restore.** Stop the agent's timer on every device so nothing ships halfway, then on the server:
+
+```sh
+docker compose exec -T postgres sh -c \
+  'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < harness-telemetry-<time>.dump
+```
+
+Restart the timers. Each device's next `sync` ships anything newer than the dump from its outbox.
+
+**Before fixing data by hand,** run `server/backup/backup.sh` first, and make the change inside `BEGIN` … `COMMIT`
+so you can check it before it sticks. A fix made only in Postgres is overwritten by the next `backfill` from a
+device's outbox. A fix that should last belongs in the outbox, the way `agent/scripts/retag-project.mjs` and
+`reroot-project.mjs` do it.
 
 ---
 

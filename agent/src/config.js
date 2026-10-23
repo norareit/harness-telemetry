@@ -53,6 +53,12 @@ const DEFAULTS = {
   // generous against the 5-minute timer; a laptop that sleeps overnight
   // wants a larger value (or legitimately fails doctor the next morning).
   sync: { staleAfterMinutes: 60 },
+  // Database backups (plans/019). `source` is the rsync source of the
+  // server's nightly dumps (e.g. "<server-host>:backups/harness-telemetry/");
+  // null means this device doesn't pull them. `dir` null means
+  // <DATA_DIR>/db-backups. doctor's "last backup" fails once the newest dump
+  // is older than staleAfterHours.
+  backup: { source: null, dir: null, keep: 60, staleAfterHours: 48 },
   // Counterfactual targets materialized into Postgres for the dashboard
   // (plans/002). Defaulted rather than left empty so an existing config.json
   // written before this feature still gets scenarios. Set to [] to opt out.

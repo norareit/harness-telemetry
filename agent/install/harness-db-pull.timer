@@ -1,0 +1,16 @@
+[Unit]
+Description=Pull the harness telemetry database dumps daily
+Documentation=https://github.com/norareit/harness-telemetry
+
+[Timer]
+# Local time, well after the server's 03:30 dump. Move it with a drop-in:
+# `systemctl --user edit harness-db-pull.timer`.
+OnCalendar=*-*-* 11:30
+# A client is often off at 11:30. Persistent= remembers the last run, so a missed
+# one fires as soon as the timer starts again, at the next login. Plan 012's
+# warning about Persistent= is about a timer without OnCalendar=; this one has it.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

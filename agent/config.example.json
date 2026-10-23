@@ -45,6 +45,15 @@
     "staleAfterMinutes": 60
   },
 
+  "backup": {
+    "//": "Pull the server's nightly database dumps (README, 'Backups'). null = this device doesn't pull them.",
+    "source": null,
+    "//dir": "null = ~/.local/share/harness-usage/db-backups. keep: dumps kept locally. staleAfterHours: for doctor.",
+    "dir": null,
+    "keep": 60,
+    "staleAfterHours": 48
+  },
+
   "project": {
     "//detectRoot": "true = file events under the nearest .git ancestor of the working directory, so subdirectories of one repo collapse into it; false = the working directory itself (pre-plan-008).",
     "detectRoot": true
