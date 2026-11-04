@@ -1,7 +1,10 @@
 # Plan 020 — Tokens over time by model
 
 Type: **task**
-Status: **planned** (2026-11-05).
+Status: **implemented, layout A** (2026-11-05); step 3 still open. The JSON parses, panel ids are unique and there
+are no `gridPos` overlaps. The `rawSql` of panel 13 (macros substituted, filters open) ran against the live Postgres:
+for 12h and 30d the sum over all series equals panel 3's total (158,229,572 / 2,556,824,085 tokens), 11 models in
+30d.
 Builds on 010, 011 and 013.
 
 ## Feature
