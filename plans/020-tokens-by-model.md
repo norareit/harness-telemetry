@@ -1,10 +1,11 @@
 # Plan 020 — Tokens over time by model
 
 Type: **task**
-Status: **implemented, layout A** (2026-11-05); step 3 still open. The JSON parses, panel ids are unique and there
-are no `gridPos` overlaps. The `rawSql` of panel 13 (macros substituted, filters open) ran against the live Postgres:
-for 12h and 30d the sum over all series equals panel 3's total (158,229,572 / 2,556,824,085 tokens), 11 models in
-30d.
+Status: **implemented, layout B** (2026-11-05). The JSON parses, panel ids are unique and there are no `gridPos`
+overlaps. The `rawSql` of panel 13 (macros substituted, filters open) ran against the live Postgres: for 12h and 30d
+the sum over all series equals panel 3's total (158,229,572 / 2,556,824,085 tokens), 11 models in 30d. Layout A was
+deployed first and Stef found it far too cramped in Grafana (legends at the bottom left almost no room for bars), so
+the panel now has its own full-width row. Layout B has not been seen rendered yet.
 Builds on 010, 011 and 013.
 
 ## Feature
@@ -39,7 +40,7 @@ Write the `rawSql` on one line like panel 10, or with `\n` like panel 11. Either
 
 Panels 10 and 11 currently share the row at `y:4` (`w:12` each). Two options, in order of preference.
 
-**A — three across (try first).** The new panel goes between 10 and 11:
+**A — three across (tried, rejected).** The new panel goes between 10 and 11:
 
 | id | title | x | w |
 |---|---|---|---|
@@ -51,16 +52,16 @@ All `y:4 h:9`. Nothing else moves. At `w:8` a right-hand table legend leaves lit
 long), so for all three panels set `options.legend.placement` to `"bottom"` (keep `displayMode: "table"` and
 `calcs: ["sum"]`).
 
-**B — fallback, if A is too cramped in Grafana.** Cost and tokens by model sit side by side, and tokens by kind gets
-its own full-width row:
+**B — chosen.** Panels 10 and 11 keep their original place (`y:4`, `w:12` each) and their legends go back to
+the right. "Tokens over time by model" gets its own full-width row directly below them:
 
 | id | x | y | w | h |
 |---|---|---|---|---|
 | 10 | 0 | 4 | 12 | 9 |
-| 13 | 12 | 4 | 12 | 9 |
-| 11 | 0 | 13 | 24 | 9 |
+| 11 | 12 | 4 | 12 | 9 |
+| 13 | 0 | 13 | 24 | 9 |
 
-Legends stay on the right. Every panel below moves down by 9:
+Panel 13's legend is on the right too. Every panel below moves down by 9:
 
 | id | y before | y after |
 |---|---|---|
@@ -71,7 +72,7 @@ Legends stay on the right. Every panel below moves down by 9:
 | 41, 42 | 51 | 60 |
 | 43 | 60 | 69 |
 
-Stef decides between A and B after seeing A rendered. If B, revert the legend placement change from A.
+A was tried first and rejected after seeing it rendered.
 
 ## Changes
 
@@ -83,4 +84,4 @@ Stef decides between A and B after seeing A rendered. If B, revert the legend pl
 1. The file still parses as JSON, panel ids are unique, and there are no `gridPos` overlaps.
 2. The query, with the Grafana macros substituted by hand, runs against the live Postgres for a 12h and a 30d range.
    The sum over all series and buckets equals panel 3's total for the same range.
-3. After the server deploy (`rsync` of `server/`), the panel renders in Grafana, and Stef picks layout A or B.
+3. After the server deploy (`rsync` of `server/`), the panel renders in Grafana.

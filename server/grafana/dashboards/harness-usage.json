@@ -146,7 +146,7 @@
       "id": 10,
       "title": "Cost over time by model",
       "type": "timeseries",
-      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 4 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {
@@ -155,7 +155,7 @@
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
           "refId": "A",
@@ -169,7 +169,7 @@
       "id": 13,
       "title": "Tokens over time by model",
       "type": "timeseries",
-      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 4 },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 13 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {
@@ -178,7 +178,7 @@
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
           "refId": "A",
@@ -192,7 +192,7 @@
       "id": 11,
       "title": "Tokens over time by kind",
       "type": "timeseries",
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 4 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {
@@ -201,7 +201,7 @@
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
           "refId": "A",
@@ -216,7 +216,7 @@
       "id": 20,
       "title": "Cost by project",
       "type": "barchart",
-      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 13 },
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 22 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "options": { "orientation": "horizontal", "legend": { "showLegend": false }, "xTickLabelRotation": 0 },
@@ -233,7 +233,7 @@
       "id": 21,
       "title": "Cost by device",
       "type": "piechart",
-      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 13 },
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 22 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "options": {
@@ -254,7 +254,7 @@
       "id": 22,
       "title": "Billable vs local vs subscription",
       "type": "piechart",
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 13 },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 22 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
@@ -277,7 +277,7 @@
       "title": "Tokens by project",
       "description": "All token kinds, stacked by billing. Local model work costs $0, so it is invisible in Cost by project; here it shows as 'local'.",
       "type": "barchart",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 22 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 31 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": { "unit": "short" },
@@ -302,7 +302,7 @@
       "title": "Tokens over time by project",
       "description": "All token kinds. The 8 largest projects in the range get their own series (by basename, so a repo on two devices is one series); the rest are summed as (other).",
       "type": "timeseries",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 22 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 31 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {
@@ -326,7 +326,7 @@
       "id": 30,
       "title": "Top sessions by cost",
       "type": "table",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 31 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 40 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {},
@@ -351,7 +351,7 @@
       "title": "Counterfactual cost over time — actual vs alternatives",
       "description": "What the same token stream would have cost at other models' rates. Estimates: token counts are not portable across tokenizers.",
       "type": "timeseries",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 41 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 50 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {
@@ -386,7 +386,7 @@
       "title": "What the local model is saving",
       "description": "Ollama-billed tokens repriced onto hosted models. Local inference has no prompt caching, so context is re-sent as fresh input every turn — which is why the input count is large.",
       "type": "table",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 51 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 60 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {},
@@ -410,7 +410,7 @@
       "title": "Cheapest alternative per project",
       "description": "The decision aid. Check cache_model before acting: a target with 'none' has no prompt caching and bills cache reads at full input rate.",
       "type": "table",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 51 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 60 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {},
@@ -435,7 +435,7 @@
       "title": "Effective rates applied, by model",
       "description": "The per-million-token rates actually used to compute cost. A step here is a models.json price change, not a change in your behaviour — which is precisely what storing the rates makes visible.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 60 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 69 },
       "datasource": { "type": "postgres", "uid": "harness-pg" },
       "fieldConfig": {
         "defaults": {
