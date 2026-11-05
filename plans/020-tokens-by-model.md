@@ -5,7 +5,7 @@ Status: **implemented, layout B** (2026-11-05). The JSON parses, panel ids are u
 overlaps. The `rawSql` of panel 13 (macros substituted, filters open) ran against the live Postgres: for 12h and 30d
 the sum over all series equals panel 3's total (158,229,572 / 2,556,824,085 tokens), 11 models in 30d. Layout A was
 deployed first and Stef found it far too cramped in Grafana (legends at the bottom left almost no room for bars), so
-the panel now has its own full-width row. Layout B has not been seen rendered yet.
+the panel now has its own full-width row. Stef confirmed layout B in Grafana.
 Builds on 010, 011 and 013.
 
 ## Feature
