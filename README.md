@@ -212,6 +212,47 @@ as a budget.
 The `scenarios` list in `config.json` is the subset materialized into Postgres for the dashboard; set it to `[]` to skip
 that work entirely.
 
+#### Changing the dashboard models
+
+Do this **on each device** that contributes usage (for example, both a desktop and a laptop):
+
+1. Edit `~/.config/harness-usage/config.json` and change the `scenarios` array. Each entry is an exact catalogue key.
+   The current Fable, Gemini and Kimi targets are:
+
+   ```json
+   "openrouter/anthropic/claude-fable-5.2",
+   "openrouter/google/gemini-4-hydrogen",
+   "openrouter/google/gemini-4-carbon",
+   "openrouter/moonshotai/kimi-k3.1-pro"
+   ```
+
+   Keep the other models you want; remove the old Gemini 3.1 and Kimi K2.7 entries when replacing them.
+   Updating the repo's defaults or example does **not** change a device's explicit `scenarios` array.
+2. Run `harness-usage doctor --only "scenarios resolve"`. If a new model is missing, open OpenCode to refresh that
+   device's price table and check again.
+3. Run `harness-usage sync`. This adds the new scenarios for **all events in the local store**, including old ones,
+   and ships them. No backfill or `reprice` is needed. Newly added historical comparisons use today's available rates;
+   existing valuations stay frozen. The next scheduled run also picks up config changes; no scheduler restart is needed.
+4. Retired scenarios are removed from the local store, but their already-shipped Postgres rows remain visible.
+   After taking a [server backup](#backups), remove those rows in a transaction on the server, scoped to the device
+   whose config was updated. For example, substitute the actual device name and the exact retired keys:
+
+   ```sql
+   BEGIN;
+   DELETE FROM usage_scenario s USING usage_event e
+   WHERE s.harness = e.harness AND s.session_id = e.session_id AND s.message_id = e.message_id
+     AND e.device = '<updated-device>'
+     AND s.scenario IN (
+       'openrouter/google/gemini-3.1-pro-preview',
+       'openrouter/google/gemini-3.1-pro-preview-customtools',
+       'openrouter/moonshotai/kimi-k2.7-code'
+     );
+   COMMIT;
+   ```
+
+   Repeat for each updated device. A device still configured with the old targets can continue shipping them.
+   The dashboard reads scenario names from Postgres, so no Grafana edit or restart is needed.
+
 Exit codes are split between the agent and its launcher (`bin/harness-usage`) so a launch failure can never be mistaken
 for a healthy run — it once was, silently, for 13 hours (plans/007):
 
