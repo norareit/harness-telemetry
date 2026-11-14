@@ -1,7 +1,8 @@
 # Refresh counterfactual models
 
 Type: task
-Status: Implemented on this client; 207 tests pass, scenario resolution and shipping verified. MacBook update pending.
+Status: Implemented and verified on both clients (desktop and MacBook); retired scenario rows removed from Postgres
+for both.
 
 ## Goal
 
@@ -38,5 +39,11 @@ Record the actual local and server results here; another client's deployment mus
 - Ran the deployed server backup script successfully before server cleanup; dump verified with 20 entries.
 - Removed 67,262 retired scenario rows for this client inside a checked Postgres transaction.
   Confirmed only the 14 configured scenario names remained for this client before committing.
-- The other client's rows still contain Gemini 3.1 Pro Preview and Kimi K2.7 Code; its config and deployment have
-  not been accessed or changed. Follow the README's per-device procedure there, then clean up its retired server rows.
+- MacBook, following the README procedure: `doctor --only "scenarios resolve"` first failed with no rate card for
+  the four new targets because its OpenCode price table was a month old. `opencode models --refresh` fixed that, and
+  all 12 configured targets then resolved. That client had only one Gemini 3.1 entry.
+- MacBook `harness-usage sync`: shipped 6 events and 16,148 scenario rows, pruned the two retired scenarios locally,
+  backlog clear. Each new target then had 4,027 rows for that device in Postgres.
+- MacBook has no SSH key on the server and no `pg_dump`, so instead of a full dump the 8,038 rows to be removed were
+  exported to JSON on that client first. They were then deleted in a transaction that checked the deleted count
+  matched the export and that only the 12 configured scenario names remained for the device before committing.
