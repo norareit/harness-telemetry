@@ -1,7 +1,8 @@
 # Price gpt-6.1-sol-fast
 
 Type: bug
-Status: Planned
+Status: Implemented. On the desktop client: 'reprice --unpriced-only' repriced exactly the 4 events ($0 -> net
+$0.10); doctor 22/22, new pin reported unverifiable under override drift as expected. npm test 208/208.
 
 ## What is broken
 
