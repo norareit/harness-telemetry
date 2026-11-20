@@ -29,6 +29,14 @@
     "gpt-6.1-sol entry (Vercel says 272001). Gateway price, not OpenAI direct;",
     "replace if OpenAI lists it. See plan 022."
   ],
+  "//openai/gpt-6.2-sol-fast": [
+    "Same gap again: models.json lists only gpt-6.2-sol (2/10) under 'openai'.",
+    "The fast tier appears only as 'vercel :: openai/gpt-6.2-sol-fast' and",
+    "'kilo :: openai/gpt-6.2-sol-fast', both 4/20/0.2/5 (exactly 2x the base",
+    "model, same as gpt-6.1-sol-fast). Tier from Vercel's listing, sized 272000",
+    "to match OpenAI's own gpt-6.2-sol entry. Gateway price, not OpenAI direct;",
+    "replace if OpenAI lists it. See plan 023."
+  ],
   "overrides": {
     "opencode/big-pickle": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
     "openai/gpt-5.6-terra-fast": {
@@ -38,6 +46,18 @@
       "cache_write": 5
     },
     "openai/gpt-6.1-sol-fast": {
+      "input": 4,
+      "output": 20,
+      "cache_read": 0.2,
+      "cache_write": 5,
+      "tiers": [
+        {
+          "input": 8, "output": 30, "cache_read": 0.4, "cache_write": 10,
+          "tier": { "type": "context", "size": 272000 }
+        }
+      ]
+    },
+    "openai/gpt-6.2-sol-fast": {
       "input": 4,
       "output": 20,
       "cache_read": 0.2,

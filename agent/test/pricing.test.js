@@ -182,19 +182,22 @@ test("13: cacheModelOf classifies caching support", () => {
   assert.equal(p.cacheModelOf("p/none"), "none");
 });
 
-test("14: the shipped override prices openai/gpt-6.1-sol-fast (plan 022)", async () => {
-  const p = await loadPricing({ modelsJsonPath: "/nonexistent/models.json" });
-  const { card, source } = p.resolve("openai", "gpt-6.1-sol-fast");
-  assert.equal(source, "override");
-  assert.deepEqual(card.base, { input: 4, output: 20, cache_read: 0.2, cache_write: 5 });
+// Plans 022 and 023: OpenAI's fast tiers are gateway-priced pins at 2x the base model.
+for (const model of ["gpt-6.1-sol-fast", "gpt-6.2-sol-fast"]) {
+  test(`14: the shipped override prices openai/${model} (plans 022, 023)`, async () => {
+    const p = await loadPricing({ modelsJsonPath: "/nonexistent/models.json" });
+    const { card, source } = p.resolve("openai", model);
+    assert.equal(source, "override");
+    assert.deepEqual(card.base, { input: 4, output: 20, cache_read: 0.2, cache_write: 5 });
 
-  const ev = (input_tokens) => event({ provider: "openai", model: "gpt-6.1-sol-fast", input_tokens });
-  const small = p.price(ev(100_000));
-  assert.equal(small.priced_by, "override");
-  assert.equal(small.tier_applied, null);
-  assert.equal(small.rate_input, 4);
-  const large = p.price(ev(300_000));
-  assert.equal(large.tier_applied, 272000);
-  assert.equal(large.rate_input, 8);
-  assert.equal(large.rate_output, 30);
-});
+    const ev = (input_tokens) => event({ provider: "openai", model, input_tokens });
+    const small = p.price(ev(100_000));
+    assert.equal(small.priced_by, "override");
+    assert.equal(small.tier_applied, null);
+    assert.equal(small.rate_input, 4);
+    const large = p.price(ev(300_000));
+    assert.equal(large.tier_applied, 272000);
+    assert.equal(large.rate_input, 8);
+    assert.equal(large.rate_output, 30);
+  });
+}
