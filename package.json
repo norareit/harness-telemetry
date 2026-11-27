@@ -1,0 +1,10 @@
+{
+  "name": "harness-telemetry",
+  "private": true,
+  "devDependencies": {
+    "agentrite": "^8.5.0"
+  },
+  "scripts": {
+    "check-changes": "node node_modules/agentrite/scripts/check-changes.mjs"
+  }
+}

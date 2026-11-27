@@ -1,0 +1,31 @@
+# This project's half of the agent sandbox configuration. It layers over the kit's base
+# at node_modules/agentrite/container/compose.yml, which holds everything
+# that confines the container and is the same for every project. Here is only what
+# varies with the project: its names, what it is allowed to reach, how much of the host
+# it may use, and, when it has browser tests, the Playwright version they were rendered with.
+#
+# The kit's container/sandbox.sh passes both files to Compose with --project-directory set
+# to this repository, so relative paths resolve from the repository root.
+name: harness-telemetry-sandbox
+
+services:
+  sandbox:
+    image: harness-telemetry-sandbox
+
+    # Leave the host usable. Overridable from the environment for a heavier run.
+    mem_limit: ${SANDBOX_MEM_LIMIT:-8g}
+    cpus: ${SANDBOX_CPUS:-6}
+
+    environment:
+      # Reachable hosts, over HTTPS on port 443 only, besides those the kit admits
+      # itself: the npm registry, and the hosts each harness that agentrite.json names
+      # needs. See KIT_ALLOWLIST in the kit's container/compose.yml, and the kit's
+      # SANDBOX.md for the list. Everything else is denied.
+      # Comments and blank lines are ignored. Entries are hostnames only; the
+      # entrypoint refuses an address or a CIDR range, and fails to start if a listed
+      # host is unreachable. The kit's SANDBOX.md explains the boundary under "Reaching
+      # more hosts".
+      ALLOWLIST: |
+        # Add the hosts this project needs, one per line: the API host of each model
+        # provider its agents use besides Anthropic, such as api.openai.com, and what
+        # its tools and tests reach, such as github.com for git over HTTPS.

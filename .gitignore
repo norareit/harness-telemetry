@@ -27,3 +27,6 @@ events/
 .idea/
 .vscode/
 *.swp
+
+# AgentRite reviewer output
+.reviews/
