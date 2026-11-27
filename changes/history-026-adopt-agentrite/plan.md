@@ -15,8 +15,9 @@ checks below were run, since most of them need the `history-` directories. Verif
 - After the review findings (see "Review findings"), on `9a5cea3`: `npm test` in `agent/` 269 pass, 0 fail, on the
   host, and the same inside the sandbox (`./sandbox.sh --in-place`, image built with `sandbox/Dockerfile`, after
   `npm ci` in `agent/`), where `command -v rsync` printed `/usr/bin/rsync`. `npm run check-changes` exits 0
-- Two separate checks for C1. The kit's image without the Dockerfile has no `rsync`: `command -v rsync` in it printed
-  nothing, here and in the first review. The six backup tests that fail without `rsync` were reproduced by the
+- Two separate checks for C1. The kit's image without the Dockerfile has no `rsync`: the first review found it absent
+  in the base image, and here `command -v rsync` found none in the AgentRite repository's own sandbox image, which
+  is built on the kit's image and adds no `rsync`. The six backup tests that fail without `rsync` were reproduced by the
   first review on the host, with `rsync` taken off `PATH`, and not in the kit's image. That run was not repeated here
 
 ## The task
