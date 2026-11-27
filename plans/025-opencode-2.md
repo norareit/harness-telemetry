@@ -209,9 +209,9 @@ no file at `pricing.catalogDb`, a database **without a `kv` table** (every 1.19.
 table), no `models-dev:v3:catalog` row, or a `body` that does not parse. Check for the table in `sqlite_master` before
 querying it, rather than relying on a `catch` around the query.
 
-`meta` records which source won, its path (for the database `<path>#kv:models-dev:v3:catalog`) and its date. doctor's "price table" and "price table freshness" checks report
-that source and date, not `models.json`'s mtime. Extra homes' catalogues are not read: the price table is the
-device's own.
+`meta` records which source won, its path (for the database `<path>#kv:models-dev:v3:catalog`) and its date.
+doctor's "price table" and "price table freshness" checks report that source and date, not `models.json`'s mtime.
+Extra homes' catalogues are not read: the price table is the device's own.
 
 Only that `kv` row is read. The agent never queries `credential`, or any table this plan does not name.
 
