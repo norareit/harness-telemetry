@@ -17,7 +17,7 @@ import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { loadConfig, expandHome, CONFIG_PATH, DATA_DIR } from "./config.js";
 import { LocalStore } from "./local-store.js";
-import { loadPricing } from "./pricing.js";
+import { loadPricing, hasTokens } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
 import { reconcile, listModels, readHomeDatabase } from "./sources/opencode.js";
 import { parseRecord, providerOf, listTranscripts, countHomeEvents } from "./sources/claude-code.js";
@@ -359,6 +359,8 @@ function checkNoUnpricedBillable(ctx) {
   for (const e of ctx.store.allEvents()) {
     if (e.priced_by !== "none") continue;
     if (e.billing === "local") continue;
+    // No tokens means $0 under any rate card: a failed request, e.g. an API 400 (plan 024).
+    if (!hasTokens(e)) continue;
     const k = `${e.provider}/${e.model}`;
     byModel.set(k, (byModel.get(k) || 0) + 1);
   }

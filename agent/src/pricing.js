@@ -203,6 +203,21 @@ export class Pricing {
 
 // --- costing ---------------------------------------------------------------
 
+/** Token fields that carry a price. An event with none of them costs $0 under any rate card. */
+const PRICED_TOKEN_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "reasoning_tokens",
+  "cache_read_tokens",
+  "cache_write_5m_tokens",
+  "cache_write_1h_tokens",
+];
+
+/** True when the event has any token a rate card would charge for (plan 024). */
+export function hasTokens(ev) {
+  return PRICED_TOKEN_FIELDS.some((f) => (ev[f] ?? 0) !== 0);
+}
+
 /**
  * @param {object} ev             canonical token counts
  * @param {object} card           { base, tiers }

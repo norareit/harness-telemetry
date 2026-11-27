@@ -1,7 +1,8 @@
 # Don't flag zero-token events as unpriced
 
 Type: bug
-Status: Planned.
+Status: Implemented. On the desktop client: doctor 22/22, the 2 zero-token terra-flex events no longer flagged;
+no override added, no reprice run. npm test 211/211. No existing sync test covered the unpriced report.
 
 ## What is broken
 

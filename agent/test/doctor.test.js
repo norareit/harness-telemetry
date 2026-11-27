@@ -123,10 +123,41 @@ test("check 'no unpriced billable events' flags a non-local unpriced event", (t)
     } catch {}
     rmSync(dir, { recursive: true, force: true });
   });
-  store.record(event({ provider: "mystery", model: "who", billing: "free", priced_by: "none" }));
+  store.record(event({ provider: "mystery", model: "who", billing: "free", priced_by: "none", input_tokens: 10 }));
   const r = check("no unpriced billable events")({ store });
   assert.equal(r.ok, false);
   assert.match(r.detail, /mystery\/who \(1\)/);
+});
+
+// Plan 024: a request the API rejected (e.g. 400 "Unsupported service_tier: flex")
+// is stored with zero tokens. It costs $0 under any rate, so it is not a gap.
+test("check 'no unpriced billable events' ignores zero-token events", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  const store = new LocalStore({ dataDir: dir });
+  t.after(() => {
+    try {
+      store.close();
+    } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  });
+  store.record(event({ provider: "openai", model: "gpt-5.6-terra-flex", billing: "free", priced_by: "none" }));
+  const ok = check("no unpriced billable events")({ store });
+  assert.equal(ok.ok, true);
+  assert.match(ok.detail, /every non-local event carries a rate card/);
+
+  store.record(
+    event({
+      message_id: "m2",
+      provider: "openai",
+      model: "gpt-5.6-terra-flex",
+      billing: "free",
+      priced_by: "none",
+      cache_read_tokens: 1,
+    }),
+  );
+  const bad = check("no unpriced billable events")({ store });
+  assert.equal(bad.ok, false);
+  assert.match(bad.detail, /1 events with no rate card: openai\/gpt-5.6-terra-flex \(1\)/);
 });
 
 // C1: the postgres schema check must run on its own, via ctx.postgres(), not a

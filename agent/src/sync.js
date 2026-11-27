@@ -9,7 +9,7 @@
 //     stable PK makes replays idempotent.
 
 import { loadConfig } from "./config.js";
-import { loadPricing } from "./pricing.js";
+import { loadPricing, hasTokens } from "./pricing.js";
 import { LocalStore } from "./local-store.js";
 import { PostgresSink } from "./sink-postgres.js";
 import { extractClaudeCode } from "./sources/claude-code.js";
@@ -93,7 +93,8 @@ export async function runSync({ full = false, noShip = false } = {}) {
           const { priced, frozen } = valueAtIngest({ store, pricing, raw, billing });
           if (frozen) report.frozen++;
 
-          if (priced.priced_by === "none" && priced.billing !== "local") {
+          // A zero-token event costs $0 under any rate, so it is not reported (plan 024).
+          if (priced.priced_by === "none" && priced.billing !== "local" && hasTokens(raw)) {
             report.unpriced.add(`${raw.provider}/${raw.model}`);
           }
 

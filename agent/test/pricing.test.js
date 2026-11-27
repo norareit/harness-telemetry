@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Pricing, loadPricing } from "../src/pricing.js";
+import { Pricing, loadPricing, hasTokens } from "../src/pricing.js";
 import { table, event } from "./helpers.js";
 
 const price = (entries, ev, billing = "free", overrides = {}) =>
@@ -201,3 +201,17 @@ for (const model of ["gpt-6.1-sol-fast", "gpt-6.2-sol-fast"]) {
     assert.equal(large.rate_output, 30);
   });
 }
+
+test("hasTokens is false only when every priced token field is zero (plan 024)", () => {
+  assert.equal(hasTokens(event()), false);
+  for (const f of [
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cache_read_tokens",
+    "cache_write_5m_tokens",
+    "cache_write_1h_tokens",
+  ]) {
+    assert.equal(hasTokens(event({ [f]: 1 })), true, f);
+  }
+});
