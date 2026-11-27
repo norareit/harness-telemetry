@@ -373,8 +373,9 @@ the catalogue is ignored and `models.json` is used, as when it is absent.
 
 **Fix:** `readCatalog` returns either a usable catalogue or a reason. "Absent" (no file, no `kv` table, no row) is
 silent, as before. "Unusable" (a value or `body` that does not parse, no valid `updatedAt`, no priced model) is
-recorded as `meta.catalogIgnored`, and doctor's "price table" check shows it after its detail. That check still
-passes when `models.json` loaded: the table works, and "price table freshness" flags it once it ages.
+recorded as `meta.catalogIgnored` (`meta.ignored` since R4), and doctor's "price table" check shows it after its
+detail. That check still passes when `models.json` loaded: the table works, and "price table freshness" flags it
+once it ages.
 
 ### R2. Conversion can erase a branch already stored
 
@@ -405,6 +406,25 @@ for it this is the check as before. The 1.x check over `session` stays as it is.
 **Fix:** `reconcile`'s 2.x part does exactly that. Doctor's label becomes "2.x: N/M sessions reconcile (1.x
 messages plus 2.x-only messages vs session_v2 rollups)". On the converted copy of the verification, all 373
 sessions have 1.x sums equal to both rollups (finding 6), so the check passes there as before.
+
+### R4. Both price sources must be usable before they compete (re-review)
+
+**Broken:** `loadPricing` accepts any `models.json` that parses. A newer file holding `{}` beat a working catalogue.
+doctor's "price table" then passed with 0 models, `sync` froze a billable event at $0, and a `backfill` kept it at
+$0 after the catalogue took over (the freeze of plan 004 at work). R1's catalogue check also counted entries of a
+`models` **array** as priced models.
+
+**Should be:** a source competes on freshness only when it is a usable table. That means an object of providers,
+each with a `models` object (not an array), and at least one entry whose `cost` is a usable rate card: an object
+with a finite `input` and `output`. The rule is the same for both sources, applied to the catalogue after conversion.
+A source that is present but unusable is ignored and named. When neither source is usable, `tableError` is set, and
+doctor's "price table" fails.
+
+**Fix:** one `usableTable(table)` in `pricing.js`, used for both sources. `models.json` that is missing is silent,
+as before. One that does not parse, or is not usable, is reported. `meta.catalogIgnored` becomes `meta.ignored`, a
+list of `<path>: <reason>` for every source that was present and ignored, and doctor's "price table" lists it. An
+event already frozen at $0 is corrected with `reprice --unpriced-only`, as doctor's "no unpriced billable events"
+check already advises. That is not changed here.
 
 ## Out of scope
 
