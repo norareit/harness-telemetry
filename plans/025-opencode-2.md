@@ -1,9 +1,29 @@
 # Plan 025 — Read OpenCode 2 databases
 
 Type: **task**
-Status: **planned** (2026-11-27). Not implemented. The facts under "Findings" were checked on the desktop client: the
-schema against a backup copy of its 1.19.6 database, converted by OpenCode 2.4.2 in a scratch home, and the price
-catalogue in a second scratch home after a login.
+Status: **implemented** (2026-11-27), steps 1 and 2 of "Order of moving" pending. The facts under "Findings" were
+checked on the desktop client: the schema against a backup copy of its 1.19.6 database, converted by OpenCode 2.4.2
+in a scratch home, and the price catalogue in a second scratch home after a login. Verified:
+
+- `npm test`: 244 pass, also with an empty `HOME`.
+- Steps 1 and 2 of "Verification", on the desktop client, against a fresh backup copy of its 1.19.6 database
+  (8,435 OpenCode events), with a scratch config and data directory:
+  - Before conversion, `sync --no-ship` recorded 8,435 new. The copy has no `kv` table, so this also ran the price
+    table's 1.x fallback on real data: `models.json` loaded and was used.
+  - After one OpenCode 2 run (6 of 373 sessions converted, phase `sessions`), after the second run, and after the
+    conversion completed (21 short runs), each `sync --no-ship` recorded 0 new and 0 changed. A `backfill` then gave
+    8,435 unchanged, with token sums and total cost identical to before conversion, and the archive still held
+    8,435 lines.
+  - `doctor` passed "opencode db" (`9263 messages / 373 sessions (1.x), 9659 messages / 373 sessions (2.x,
+    conversion completed)`), "opencode reconciliation" (1.x 373/373, 2.x 0/0), "price table", "price table
+    freshness", "models priced", "no unpriced billable events" and "cost reproducible from stored rates".
+  - The upsert backstop, with the anti-join removed in a scratch copy of the code: a `backfill` of the converted copy
+    gave 0 new events and identical token sums, but 3,329 `changed` (the 1 ms `ts` drift), and it appended 3,329
+    lines to the archive. That is what the anti-join prevents.
+
+Not verified: the converted catalogue pricing events live (the copy had no login, so no catalogue), and steps 3 and 4,
+which need a device or sandbox that has moved. Deviation from the plan as first written: the `workspace` join is kept
+while `workspace` has a `branch` column, rather than dropped, so a 1.x database reads exactly as before.
 
 Builds on 001–024, chiefly 004 (pricing frozen at ingest), 008 (project root) and 018 (extra homes).
 
@@ -132,9 +152,11 @@ Each OpenCode database, the device's own and each home's, is classified when ope
 
 Each part is read with its own watermark:
 
-- **v1 part:** today's query without the `workspace` join, with today's watermark keys
-  (`watermark:opencode:time_updated`, and `…:<path>` for a home). A device that upgrades the agent re-reads nothing.
-  `git_branch` is null, as it already is for every stored OpenCode event (finding 8).
+- **v1 part:** today's query, with today's watermark keys (`watermark:opencode:time_updated`, and `…:<path>` for a
+  home). A device that upgrades the agent re-reads nothing. The `workspace` join is kept only while `workspace` has a
+  `branch` column (1.x). After conversion it has none, and `git_branch` is null. That is what every stored OpenCode
+  event on the client already has (finding 8). On a 1.x database the event is exactly what it was before, also on
+  devices whose databases were not inspected.
 - **v2 part:** `session_message` joined to `session_v2`, `type = 'assistant'`, `time_updated >= ?`, with new keys
   `watermark:opencode-v2:time_updated` and `…:<path>`. `resetCursors` deletes every `watermark:%`, so `backfill`
   resets both.
@@ -158,7 +180,7 @@ Each part is read with its own watermark:
 | `model`         | `data.modelID`                                    | `data.model.id`; `variant` not stored    |
 | `agent`         | `data.agent \|\| data.mode`                       | same                                     |
 | `project`       | `session.directory`, then plan 008's root rule    | `session_v2.directory`, same rule        |
-| `git_branch`    | null (the `workspace` join is dropped)            | null                                     |
+| `git_branch`    | `workspace.branch` while that column exists       | null                                     |
 | `is_sidechain`  | `session.parent_id`                               | `session_v2.parent_id`                   |
 | `ts`            | `time.completed`, `time.created`, `time_updated`  | same                                     |
 | tokens          | `tokens.*`                                        | same (`total` absent, never read)        |
@@ -187,13 +209,15 @@ the 9,420 models priced in both (finding 12):
 
 - `input` = `text.input.price`, `output` = `text.output.price`. Without both, the entry gets no `cost`, so it is a
   table miss, as an entry without `cost` is today.
-- `cache_read` = `text.input.cache.read`, else `text.input.cache.explicit.read`.
+- `cache_read` = `text.input.cache.read`. `cache.explicit.read` is not used: the prototype that matched
+  `models.json` did not use it either.
 - `cache_write` = `text.input.cache.write` when it is a number. When it is an object, the shortest TTL it lists, in
   the order `5m`, `30m`, `1h`, `12h`. Without `write`, `text.input.cache.explicit.write`, treated the same way.
   The field is left out when there is none, which keeps the cache fallbacks of plan 002.
 - `tiers`: one per distinct `N` among the `overrides` of `text.input` and `text.output` whose `when` has exactly
-  one key, `context`, with `gt: N` or `gte: N`. Its rates follow the base rules, applied to the override, and a
-  rate the override leaves out is the base rate. The shape is `{input, output, cache_read?, cache_write?, tier:
+  one key, `context`, with `gt: N` or `gte: N`. Its rates follow the base rules, applied to the override. A price
+  the override leaves out is the base price. Cache rates are the override's own, as in `models.json`'s tiers. The
+  shape is `{input, output, cache_read?, cache_write?, tier:
   {type: "context", size: N}}`, sorted by size. `gte` is treated as `gt`, a difference of one token.
 - Ignored: overrides with any other condition, `multipliers`, `web_search`, `image`, `audio`, `video`,
   `text.output.reasoning` and `cache.storage`. None of them has a counterpart in `models.json`, and the events carry
@@ -218,8 +242,9 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
 ### Doctor
 
 - **opencode db:** counts per part, e.g. `9229 messages / 373 sessions (1.x), 70 messages / 8 sessions (2.x)`, plus
-  the conversion phase when `kv` has `migration.v1-v2` (its `phase`, as stored). It passes when at least one part is
-  present.
+  the conversion phase when `kv` has `migration.v1-v2` (its `phase`, as stored). The phase is `sessions` while the
+  conversion runs (2.4.2 stores a `cursor` beside it) and `completed` when it is done. It passes when at least one part
+  is present.
 - **opencode reconciliation:** v1 as today, over `session`. v2 only over the sessions that are **not** in `session`,
   the ones OpenCode 2 created. Converted sessions are reconciled on v1 alone: their v2 rows lack the compaction
   tokens (finding 6), but their rollups are the same in both tables. A v2 mismatch is reported like a v1 mismatch.
@@ -235,7 +260,8 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
      `readHomeDatabase`. For the device's own database with neither part, nothing is yielded (doctor reports it),
      where today `sync` throws. For a home with neither part, the error is "not an OpenCode database: needs message
      and session, or session_v2 and session_message, as tables".
-   - Drop the `workspace` join from `MESSAGE_QUERY`, and `branch` from it and from `HOME_MESSAGE_QUERY`.
+   - Join `workspace` for `branch` only while it has that column (the classifier reports it). Otherwise `branch` is
+     NULL.
    - Add `V2_MESSAGE_QUERY` and its guarded home variant, with the anti-join when there is a v1 part.
    - Add the v2 event mapping, and leave the v1 `toEvent` otherwise unchanged.
    - Separate watermark keys for the v2 part, for the device's own database and per home path.
