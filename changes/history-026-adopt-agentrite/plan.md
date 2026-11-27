@@ -14,9 +14,10 @@ checks below were run, since most of them need the `history-` directories. Verif
 - The `commit-msg` hook refused an empty test commit with a `Co-Authored-By:` trailer, and no commit was made
 - After the review findings (see "Review findings"), on `9a5cea3`: `npm test` in `agent/` 269 pass, 0 fail, on the
   host, and the same inside the sandbox (`./sandbox.sh --in-place`, image built with `sandbox/Dockerfile`, after
-  `npm ci` in `agent/`), where `command -v rsync` printed `/usr/bin/rsync`. `npm run check-changes` exits 0. The
-  kit's image without the Dockerfile has no `rsync` (checked with `command -v`); the six failing backup tests there
-  are the reviewer's observation and were not rerun
+  `npm ci` in `agent/`), where `command -v rsync` printed `/usr/bin/rsync`. `npm run check-changes` exits 0
+- Two separate checks for C1. The kit's image without the Dockerfile has no `rsync`: `command -v rsync` in it printed
+  nothing, here and in the first review. The six backup tests that fail without `rsync` were reproduced by the
+  first review on the host, with `rsync` taken off `PATH`, and not in the kit's image. That run was not repeated here
 
 ## The task
 
@@ -158,3 +159,8 @@ Outcomes, all accepted and applied:
 - **P1**: step 4 and "Verification" reworded, in `1eb254f`
 - **P2**: "A fresh clone" in `AGENTS.md` gives `npm ci`, `npx agentrite refresh` and `npm ci` in `agent/`, in
   `9a5cea3`
+
+The second review (of `93ec57c`, in `review-93ec57c.md`) found all four resolved, and one new finding:
+
+- **P3** (non-blocking): the `Status:` entry placed the six failing backup tests in the kit's image, while the first
+  review reproduced them on the host with `rsync` off `PATH`. Accepted: `Status:` now states the two checks apart
