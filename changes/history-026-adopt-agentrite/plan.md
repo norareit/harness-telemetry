@@ -1,7 +1,17 @@
 # Plan 026 — Adopt AgentRite
 
 Type: **task**
-Status: **planned**
+Status: **implemented** (2026-11-27) on the desktop client, with agentrite 8.5.0. The plans were moved before the
+checks below were run, since most of them need the `history-` directories. Verified:
+
+- `npm test` in `agent/`: 269 pass, 0 fail, the same as before the change
+- `npm run check-changes` exits 0 and `npx agentrite units` prints `no units`, with the history directories in place
+- Plans 001 to 025 are identical to their versions on `master`, and `git log --follow` on
+  `history-001-harness-usage-telemetry/plan.md` reaches its first commit, e4dad82
+- `claude -p --agent specifier`, in a scratch clone of the branch, names a new unit `changes/0001-...`. It noted
+  that `process.md` read literally would give 0027, and that the kit's `agentrite-units.mjs` and `AGENTS.md`
+  settle it as 0001
+- The `commit-msg` hook refused an empty test commit with a `Co-Authored-By:` trailer, and no commit was made
 
 ## The task
 
