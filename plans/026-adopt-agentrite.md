@@ -25,7 +25,7 @@ Read these in `../agentrite` (or in `node_modules/agentrite/` once installed) be
   "The project's settings"
 - `process.md`, "Changes": a unit's directory is `changes/<number>-<kebab-name>/`, its number four digits, and the
   highest number in any existing change directory plus one. Directories under an older naming are allowed and left
-  as they are
+  as they are. A `history-` directory does not start with a number, so it does not count toward the next one
 
 ## Changes
 
@@ -74,7 +74,11 @@ marked section for what is specific to the project, with these changes:
   > `changes/history-001-…` to `changes/history-026-…` are the plans written before the project used AgentRite,
   > each as the `plan.md` of its directory. They are history: they stay, and their text is not changed, also where it
   > names paths or rules that have changed since. A reference to "plan NNN" or "plans/NNN" in the code or the
-  > documents means `changes/history-NNN-*`. The first unit under the kit is `0027`.
+  > documents means `changes/history-NNN-*`. The history directories have numbering of their own and do not count
+  > toward a unit's number: the first unit under the kit is `0001`.
+
+  This is how the AgentRite repository does it: its `changes/0001-norareit-history` came after
+  `history-0030-role-instructions` and the others it copied in.
 
 ### 4. Move the plans
 
@@ -104,6 +108,8 @@ The plans' own text is left alone. Outside them:
 - `npm test` in `agent/` passes, with the same count as before the change
 - `npm run check-changes` at the root exits 0 with the `history-` directories in place
 - `npx agentrite units` runs and lists no open unit
+- The specifier, asked for a trial unit (not committed), numbers it `0001`. If the kit counts the `history-`
+  directories instead, stop and report it rather than renaming them
 - `git log --follow changes/history-001-harness-usage-telemetry/plan.md` reaches the plan's first commit
 - `diff` of each moved file against its version on `master` shows no difference
 - `claude --agent specifier` starts in the repository and finds the kit's instructions
