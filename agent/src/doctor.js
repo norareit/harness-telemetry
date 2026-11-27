@@ -237,17 +237,18 @@ function checkOpenCodeReconciliation(ctx) {
 }
 
 function checkPriceTable(ctx) {
-  // An unusable OpenCode 2 catalogue does not fail this check while models.json
-  // loads, but it is named: on a device that moved, models.json is ageing, and
-  // "price table freshness" alone would not say why (plans/025, R1).
-  const { tableError, modelsPath, catalogIgnored } = ctx.pricing.meta;
+  // A source that is present but unusable does not fail this check while the
+  // other one loads, but it is named: on a device that moved, models.json is
+  // ageing, and "price table freshness" alone would not say why (plans/025, R1
+  // and R4). With no usable source the check fails.
+  const { tableError, modelsPath, ignored = [] } = ctx.pricing.meta;
   return {
     ok: !tableError,
     detail:
       (tableError
         ? `failed to load ${modelsPath}: ${tableError.message}`
         : `${countModels(ctx.pricing.table)} models from ${modelsPath}`) +
-      (catalogIgnored ? `; catalogue ignored: ${catalogIgnored}` : ""),
+      (ignored.length ? `; ignored: ${ignored.join("; ")}` : ""),
   };
 }
 

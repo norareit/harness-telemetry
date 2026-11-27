@@ -371,8 +371,9 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
   event count. Fails when an entry without `*` does not exist, when a transcript or database is there and cannot
   be read the way the extractor reads it, or when one was skipped because it is not a file inside its home (the
   file is named). Absent without `homes`. The checks above and "models priced" keep reading the device's own home only.
-* **price table** — loads, model count, and which source won (`models.json` or OpenCode 2's catalogue). An OpenCode 2
-  catalogue that is there but unusable (no valid `updatedAt`, no priced model) is named, and `models.json` is used
+* **price table** — loads, model count, and which source won (`models.json` or OpenCode 2's catalogue). A source that is
+  there but unusable (no usable rate card, or a catalogue without a valid `updatedAt`) is named and never wins on
+  freshness; with no usable source the check fails
 * **reasoning tokens billed** — 1M reasoning tokens cost the full output rate (the permanent guard against the
   reasoning-exclusion regression)
 * **scenarios resolve** — every configured counterfactual target has a rate card

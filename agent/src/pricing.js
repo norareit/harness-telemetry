@@ -71,24 +71,26 @@ export async function loadPricing({ modelsJsonPath, catalogDbPath, overridesPath
     overridesPath || new URL("../pricing-overrides.json", import.meta.url).pathname,
   );
 
+  // Only a USABLE source competes on freshness (review findings R1, R4): one
+  // that is present but unusable is named in meta.ignored, never chosen for
+  // being newer. A missing models.json is silent, as before.
   let table = {};
   let tableError = null;
   let source = null;
   let path = modelsPath;
   let updatedAt = null;
-  try {
-    const st = await stat(modelsPath);
-    table = JSON.parse(await readFile(modelsPath, "utf8"));
+  const ignored = [];
+  const json = await readModelsJson(modelsPath);
+  if (json.table) {
+    ({ table, updatedAt } = json);
     source = "models.json";
-    updatedAt = st.mtimeMs;
-  } catch (err) {
-    tableError = err;
+  } else {
+    tableError = json.error;
+    if (json.ignored) ignored.push(json.ignored);
   }
 
-  // Only a usable catalogue competes on freshness (review finding R1): an
-  // unusable one is reported in meta.catalogIgnored and models.json stays.
   const catalog = catalogDbPath ? readCatalog(expandHome(catalogDbPath)) : null;
-  const catalogIgnored = catalog?.ignored ?? null;
+  if (catalog?.ignored) ignored.push(catalog.ignored);
   if (catalog?.table && (source === null || catalog.updatedAt > updatedAt)) {
     ({ table, updatedAt, path } = catalog);
     source = "catalog";
@@ -103,7 +105,53 @@ export async function loadPricing({ modelsJsonPath, catalogDbPath, overridesPath
     // overrides are optional
   }
 
-  return new Pricing(table, overrides, { modelsPath: path, source, updatedAt, tableError, catalogIgnored });
+  return new Pricing(table, overrides, { modelsPath: path, source, updatedAt, tableError, ignored });
+}
+
+/**
+ * models.json as { table, updatedAt } when usable. Otherwise { error }, plus
+ * `ignored` (a reason) when the file is there but does not parse or holds no
+ * usable rate card; a missing file is not reported (review finding R4).
+ */
+async function readModelsJson(modelsPath) {
+  let st;
+  try {
+    st = await stat(modelsPath);
+  } catch (error) {
+    return { error };
+  }
+  let table;
+  try {
+    table = JSON.parse(await readFile(modelsPath, "utf8"));
+  } catch (error) {
+    return { error, ignored: `${modelsPath}: cannot read it: ${error.message}` };
+  }
+  if (!usableTable(table)) {
+    return { error: new Error("no usable rate card"), ignored: `${modelsPath}: no usable rate card` };
+  }
+  return { table, updatedAt: st.mtimeMs };
+}
+
+/**
+ * Whether a table in models.json's shape can price anything: an object of
+ * providers, at least one with a `models` OBJECT (not an array) holding an
+ * entry whose `cost` is a usable rate card, i.e. has a finite input and output
+ * rate. The same rule for both sources, the catalogue after conversion
+ * (review finding R4).
+ */
+export function usableTable(table) {
+  if (!isObject(table)) return false;
+  for (const provider of Object.values(table)) {
+    if (!isObject(provider) || !isObject(provider.models)) continue;
+    for (const entry of Object.values(provider.models)) {
+      if (isObject(entry) && usableCard(entry.cost)) return true;
+    }
+  }
+  return false;
+}
+
+function usableCard(cost) {
+  return isObject(cost) && Number.isFinite(cost.input) && Number.isFinite(cost.output);
 }
 
 /**
@@ -115,7 +163,7 @@ export async function loadPricing({ modelsJsonPath, catalogDbPath, overridesPath
  * - { ignored: reason } when it is there but UNUSABLE (review finding R1): not
  *   a database, a value or body that does not parse, no positive `updatedAt`
  *   of its own (the row's time_updated says when the row was written, not how
- *   fresh the prices are), or no model with a usable cost. Such a catalogue
+ *   fresh the prices are), or no usable rate card (usableTable). Such a catalogue
  *   must not displace a working models.json.
  * - { table, updatedAt, path } otherwise.
  */
@@ -139,7 +187,7 @@ function readCatalog(dbPath) {
     const body = typeof value.body === "string" ? JSON.parse(value.body) : value.body;
     if (!body || typeof body !== "object" || Array.isArray(body)) return ignored("the catalogue body is not a table");
     const table = fromCatalog(body);
-    if (countPriced(table) === 0) return ignored("the catalogue has no priced model");
+    if (!usableTable(table)) return ignored("no usable rate card");
     return { table, updatedAt: value.updatedAt, path: `${dbPath}#kv:${CATALOG_KEY}` };
   } catch (err) {
     return ignored(`cannot read the catalogue: ${err.message}`);
@@ -148,17 +196,6 @@ function readCatalog(dbPath) {
       db?.close();
     } catch {}
   }
-}
-
-function countPriced(table) {
-  let n = 0;
-  for (const provider of Object.values(table)) {
-    const models = provider && typeof provider === "object" ? provider.models : null;
-    if (models && typeof models === "object") {
-      for (const entry of Object.values(models)) if (entry && typeof entry === "object" && entry.cost) n++;
-    }
-  }
-  return n;
 }
 
 // Converts every entry's cost in place: `body` was parsed for this call alone.

@@ -26,6 +26,12 @@ in a scratch home, and the price catalogue in a second scratch home after a logi
   resumed session. `npm test`: 256 pass, also with an empty `HOME`. Then, on another backup copy of the client's
   database (8,452 events, 374 sessions), converted again: `sync` and `backfill` recorded 0 new and 0 changed, and
   "opencode reconciliation" passed with 1.x 374/374 and 2.x 374/374, now over every session.
+- Review finding R4 fixed, with tests that failed before the fix: five unusable `models.json` files (each against a
+  working catalogue, and alone), a catalogue whose `models` is an array, and doctor failing with no usable source.
+  `npm test`: 269 pass, also with an empty `HOME`. The reviewer's CLI case, rerun in a scratch config (a newer
+  `models.json` of `{}` beside a working catalogue): `sync` priced the billable event from the catalogue ($2, not
+  $0). doctor's "price table" passed on the catalogue and named the `models.json` as ignored, and a `backfill` left
+  the event unchanged.
 
 Not verified: the converted catalogue pricing events live (the copy had no login, so no catalogue), and steps 3 and 4,
 which need a device or sandbox that has moved. Deviation from the plan as first written: the `workspace` join is kept

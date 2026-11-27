@@ -350,11 +350,12 @@ function catalogValue(updatedAt, costs) {
   return { updatedAt, digest: "d", body: JSON.stringify(body) };
 }
 
-function pricingSources(t, { modelsAgeDays = 1, catalog } = {}) {
+function pricingSources(t, { modelsAgeDays = 1, catalog, modelsJsonText } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "harness-pricing-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const modelsJson = join(dir, "models.json");
-  writeFileSync(modelsJson, JSON.stringify(table({ "openai/gpt-6.2-sol": { input: 2, output: 10 } })));
+  const usable = JSON.stringify(table({ "openai/gpt-6.2-sol": { input: 2, output: 10 } }));
+  writeFileSync(modelsJson, modelsJsonText ?? usable);
   const when = new Date(Date.now() - modelsAgeDays * 86_400_000);
   utimesSync(modelsJson, when, when);
   const catalogDb = join(dir, "opencode.db");
@@ -435,13 +436,22 @@ test("loadPricing: without catalogDbPath only models.json is read, dated by its 
 const catalogRow = (value, kvTimeUpdated = Date.now()) => (path) =>
   openCodeDb(path, { v1: false, v2: true, kv: { "models-dev:v3:catalog": value }, kvTimeUpdated });
 const UNUSABLE = {
-  "an empty body": [catalogRow({ updatedAt: Date.now(), digest: "d", body: "{}" }), /no priced model/],
+  "an empty body": [catalogRow({ updatedAt: Date.now(), digest: "d", body: "{}" }), /no usable rate card/],
   "a body whose models have no usable cost": [
     catalogRow({
       updatedAt: Date.now(),
       body: JSON.stringify({ openai: { models: { "gpt-6.2-sol": { cost: { text: { input: { price: 2 } } } } } } }),
     }),
-    /no priced model/,
+    /no usable rate card/,
+  ],
+  "models given as an array (R4)": [
+    catalogRow({
+      updatedAt: Date.now(),
+      body: JSON.stringify({
+        openai: { models: [{ cost: { text: { input: { price: 3 }, output: { price: 10 } } } }] },
+      }),
+    }),
+    /no usable rate card/,
   ],
   "no updatedAt of its own, however new the row is": [
     catalogRow({ digest: "d", body: catalogValue(0, { "openai/gpt-6.2-sol": { text: { input: { price: 3 },
@@ -463,7 +473,7 @@ for (const [name, [make, reason]] of Object.entries(UNUSABLE)) {
     assert.equal(p.meta.source, "models.json");
     assert.equal(p.meta.tableError, null);
     assert.equal(p.price(event({ provider: "openai", model: "gpt-6.2-sol", input_tokens: 10 })).priced_by, "table");
-    assert.match(p.meta.catalogIgnored, reason);
+    assert.match(p.meta.ignored.join("; "), reason);
   });
 }
 
@@ -477,7 +487,7 @@ test("loadPricing (R1): an absent catalogue is not reported as ignored", async (
     const s = pricingSources(t, { catalog: make });
     const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
     assert.equal(p.meta.source, "models.json");
-    assert.equal(p.meta.catalogIgnored ?? null, null);
+    assert.deepEqual(p.meta.ignored, []);
   }
 });
 
@@ -486,4 +496,42 @@ test("loadPricing (R1): with no models.json, an unusable catalogue leaves the ta
   const p = await loadPricing({ modelsJsonPath: join(s.catalogDb, "..", "missing.json"), catalogDbPath: s.catalogDb });
   assert.ok(p.meta.tableError);
   assert.equal(p.meta.source, null);
+});
+
+// Review finding R4: models.json must be usable before it competes, too.
+const UNUSABLE_MODELS_JSON = {
+  "an empty object": "{}",
+  "models given as an array": JSON.stringify({ openai: { models: [{ cost: { input: 2, output: 10 } }] } }),
+  "no entry with a numeric input and output": JSON.stringify({
+    openai: { models: { "gpt-6.2-sol": { cost: { input: "2", output: 10 } }, "gpt-x": { name: "no cost" } } },
+  }),
+  "a top-level array": JSON.stringify([{ models: {} }]),
+  "text that does not parse": "{not json",
+};
+
+for (const [name, text] of Object.entries(UNUSABLE_MODELS_JSON)) {
+  test(`loadPricing (R4): a newer models.json with ${name} does not beat a working catalogue`, async (t) => {
+    const s = pricingSources(t, { modelsAgeDays: 0, modelsJsonText: text, catalog: v2Catalog(3) });
+    const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+    assert.equal(p.meta.source, "catalog");
+    assert.equal(p.meta.tableError, null);
+    assert.equal(p.price(event({ provider: "openai", model: "gpt-6.2-sol", input_tokens: 10 })).priced_by, "table");
+    assert.equal(p.meta.ignored.length, 1);
+    assert.ok(p.meta.ignored[0].startsWith(`${s.modelsJson}: `), p.meta.ignored[0]);
+  });
+
+  test(`loadPricing (R4): a models.json with ${name} and no catalogue fails to load`, async (t) => {
+    const s = pricingSources(t, { modelsJsonText: text });
+    const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+    assert.ok(p.meta.tableError);
+    assert.equal(p.meta.source, null);
+    assert.equal(p.meta.updatedAt, null);
+  });
+}
+
+test("loadPricing (R4): a missing models.json is not reported as ignored", async (t) => {
+  const s = pricingSources(t, { catalog: v2Catalog(1) });
+  const p = await loadPricing({ modelsJsonPath: join(s.catalogDb, "..", "missing.json"), catalogDbPath: s.catalogDb });
+  assert.equal(p.meta.source, "catalog");
+  assert.deepEqual(p.meta.ignored, []);
 });

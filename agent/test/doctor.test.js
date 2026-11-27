@@ -532,8 +532,22 @@ test("check 'price table' (R1): names a catalogue that was ignored, and still pa
   const plain = check("price table")({ pricing: pricing({ modelsPath: "/m/models.json", tableError: null }) });
   assert.deepEqual(plain, { ok: true, detail: "1 models from /m/models.json" });
   const ignored = check("price table")({
-    pricing: pricing({ modelsPath: "/m/models.json", tableError: null, catalogIgnored: "/db: no priced model" }),
+    pricing: pricing({ modelsPath: "/m/models.json", tableError: null, ignored: ["/db: no usable rate card"] }),
   });
   assert.equal(ignored.ok, true);
-  assert.equal(ignored.detail, "1 models from /m/models.json; catalogue ignored: /db: no priced model");
+  assert.equal(ignored.detail, "1 models from /m/models.json; ignored: /db: no usable rate card");
+});
+
+test("check 'price table' (R4): fails when no source is usable, and names what was ignored", () => {
+  const pricing = new Pricing({}, {}, {
+    modelsPath: "/m/models.json",
+    tableError: new Error("no usable rate card"),
+    ignored: ["/m/models.json: no usable rate card"],
+  });
+  const r = check("price table")({ pricing });
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.detail,
+    "failed to load /m/models.json: no usable rate card; ignored: /m/models.json: no usable rate card",
+  );
 });
