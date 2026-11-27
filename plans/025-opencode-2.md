@@ -1,7 +1,8 @@
 # Plan 025 — Read OpenCode 2 databases
 
 Type: **task**
-Status: **planned** (2026-11-27). Not implemented.
+Status: **planned** (2026-11-27). Not implemented. The schema facts below were checked on the desktop client against
+a backup copy of its 1.19.6 database, converted by OpenCode 2.4.2 in a scratch home (see "Findings").
 
 Builds on 001–024, chiefly 004 (pricing frozen at ingest), 008 (project root) and 018 (extra homes).
 
@@ -16,49 +17,63 @@ which OpenCode 2 no longer writes to `~/.cache/opencode/models.json`.
 No Postgres schema change, no change to the event shape, no repricing. Every event from an OpenCode 2 database is
 priced once at ingest, as today.
 
-## What OpenCode 2.4.2 does (observed by the maintainer)
+## Findings
 
-These were seen with a fresh home and with a copy of a 1.19.6 database:
+### Reported by the maintainer (2.4.2)
 
-- **Messages** are written only to `session_message(id, session_id, type, seq, time_created, time_updated, data)`.
-  The role is the `type` column: `user`, `assistant`, `idle`, `system`, `synthetic`, `compaction`. The assistant
-  `data` JSON keeps `tokens {input, output, reasoning, cache:{read,write}}`, `agent` and `time.completed` as in 1.x.
-  The model moved: it is `data.model.{providerID, id, variant}`, no longer `data.providerID` / `data.modelID`.
-- **Sessions** are in `session_v2` (`directory`, `parent_id`, `workspace_id`, `version`, `agent`, `model`, and the
-  same `tokens_*` rollup columns as 1.x `session`). `workspace` has no `branch` column any more.
-- **A database created by OpenCode 2** has no `message` or `session` table. Today the agent skips such a home as
-  "not an OpenCode database" (`readHomeDatabase`), and the device's own database makes `sync` fail, because
-  `MESSAGE_QUERY` is prepared outside any error handling (`extractDatabase` in `agent/src/sources/opencode.js`).
-- **A 1.x database is converted in the background**, in batches, while OpenCode 2 runs. 373 sessions took three
-  short runs. The old `message`, `session` and `part` tables are left untouched. Converted rows keep the message ids
-  and `time_updated`, and the token sums matched exactly.
-- **Prices:** `~/.cache/opencode/models.json` is no longer written. The catalogue is in `opencode.db`, table `kv`,
-  key `models-dev:v3:catalog`, a JSON value with `updatedAt`, `digest` and `body`.
-- **Logins** moved from `auth.json` to a `credential` table in `opencode.db`, so a copy of a home now carries them.
-- **Plugins:** there is no `session.idle` event; a turn ends with `session.execution.succeeded` or
-  `session.execution.failed`. A 1.x plugin is not loaded. This repository ships no OpenCode plugin (plan 001 only
-  mentioned a `session.idle` sync as an option that was never built), so nothing here breaks. See "Out of scope".
+- New messages go only to `session_message`; the role is its `type` column. Assistant `data` keeps `tokens`,
+  `agent` and `time.completed`; the model is `data.model.{providerID, id, variant}`.
+- Sessions are in `session_v2`, with the same `tokens_*` rollup columns as `session`.
+- A database created by OpenCode 2 has no `message` or `session` table.
+- A 1.x database is converted in the background, in batches, while OpenCode 2 runs. The old `message`, `session`
+  and `part` tables stay untouched.
+- `~/.cache/opencode/models.json` is no longer written. The catalogue is in `opencode.db`, table `kv`, key
+  `models-dev:v3:catalog`, a JSON value with `updatedAt`, `digest` and `body`.
+- Logins moved from `auth.json` to the `credential` table, so a copy of a home carries them.
+- There is no `session.idle` plugin event, and a 1.x plugin is not loaded (see "Out of scope").
 
-### Not yet confirmed, to check first on a copy (step 1 of "Verification")
+### Checked on a converted copy (2026-11-27)
 
-The implementer must answer these against a **copy** before writing the matching code, and record the answers in
-this plan:
+Method: an SQLite backup of the client's live 1.19.6 database (373 sessions, 9,229 messages, 8,403 of them
+assistant messages) went into a scratch home. OpenCode 2.4.2 ran there, `--standalone`, with `HOME` and all `XDG_*`
+variables pointing into that home, until `kv` held `migration.v1-v2 = {"phase":"completed"}`. All queries were
+read-only. The scripts are not kept. The figures are:
 
-1. Do converted rows keep the **session id** as well as the message id? The event key is
-   `(harness, session_id, message_id)`; a new session id would make every converted message a second event.
-2. Does `data.model.id` of a converted message equal the old `data.modelID`, and `data.model.providerID` the old
-   `data.providerID`, for every converted assistant message? In particular, do the `-fast` model ids priced by plans
-   022 and 023 survive as ids, or become a base id plus a `variant`? Provider and model are pricing inputs.
-3. Do rows of any `type` other than `assistant` (`compaction` especially) carry non-zero `tokens`? Run the
-   reconciliation of change 4 on the copy: if assistant rows alone sum to the `session_v2` rollups for every session,
-   only assistant rows carry usage.
-4. The column names of `kv` (key and value), and the shape of `body`: a JSON string or an object, and whether it is
-   the `models.json` shape (`{ <providerId>: { models: { <modelKey>: { cost, … } } } }`). Also whether `updatedAt` is
-   epoch milliseconds or an ISO string.
-5. Whether `session_v2` and `session_message` are ordinary tables (not views) and whether `session_message.id` and
-   `message.id` are indexed (primary keys), which the anti-join of change 2 relies on.
+1. **1.19.6 already has a `session_message` table.** It is empty and its foreign key points at `session`. Every
+   OpenCode database on the client has it (the device's own, and all twelve sandbox and backlog homes). So the test
+   for "2.x" must be **`session_v2`**, not `session_message`. After conversion, `session_message` has been recreated
+   with its foreign key on `session_v2`.
+2. **The ids are kept.** All 373 `session_v2` ids are `session` ids. Each converted assistant message keeps its id,
+   `session_id`, `time_updated`, directory and `parent_id` (0 differences).
+3. **Provider, model and agent are kept.** For all 8,387 converted assistant messages, `data.model.providerID` and
+   `data.model.id` equal the old `providerID` and `modelID`, and the agent is unchanged. The `-fast` ids of plans 022
+   and 023 stay ids (`gpt-6.1-sol-fast`, `gpt-6.2-sol-fast`). The effort goes into `variant` (`default`, `low`,
+   `medium`, `high`, `xhigh`, `max`) and leaves the model id alone. Converted `data` has no `role` key.
+4. **The token values are kept, but the JSON is not identical.** v2 drops `tokens.total`. Every counter matches.
+5. **`time.completed` moves by 1 ms** in 3,322 of the converted assistant messages (rounding). `ts` is an event
+   field, so the same message read from v2 would differ from the stored event.
+6. **Compaction usage is lost in v2.** 16 converted assistant messages are not assistant rows in v2. They were 1.x
+   compaction summaries (`agent`/`mode` = `compaction`, real calls on `gpt-5.6-terra-fast`, about 1.03M tokens). In
+   v2 they are `type = 'compaction'` rows whose `data` holds only `status`, `reason`, `summary`, `metadata` and
+   `time`: no tokens and no model. They are in 11 sessions. For those 11 sessions, the v2 assistant sums fall short
+   of the `session_v2` rollups, so 362 of 373 sessions reconcile on v2. The rollups of `session` and `session_v2` are
+   equal for all 373.
+7. **Only assistant rows carry tokens.** Of the 9,625 converted rows (8,387 `assistant`, 797 `user`, 331 `system`,
+   94 `synthetic`, 16 `compaction`), only assistant rows have non-zero tokens. 412 rows have ids that are not in
+   `message` (331 `system` and 81 `synthetic`, all without tokens), and every v2 assistant id is also in `message`.
+8. **`workspace` is replaced.** After conversion it is `workspace(id, provider, binding, created_at, last_used_at)`,
+   with no `branch`. Today's query (`LEFT JOIN workspace w … w.branch`) then fails with `no such column: w.branch`.
+   So the agent breaks on a **converted** database, not only on a new one. A branch was never recorded, though:
+   every OpenCode database on the client has 0 workspaces and 0 sessions with a `workspace_id`, and none of the
+   10,847 OpenCode events in the local store has a `git_branch`.
+9. **The tables are ordinary**, and the ids are primary keys: `session_v2.id`, `session_message.id`, `message.id`
+   and `kv.key`. `kv` is `kv(key TEXT PRIMARY KEY, value TEXT, time_created INTEGER, time_updated INTEGER)`.
+10. **The catalogue was not reproduced.** In the scratch home (no logins: `auth.json` was not copied), neither
+    `session list` nor `models` wrote a `models-dev:v3:catalog` row, and `models` listed only OpenCode's free models.
+    The shape of `body` and the type of `updatedAt` are **not confirmed**. See change 2.
 
-If answer 1 or 2 is "no", stop and bring it back to the maintainer: the design below assumes "yes".
+Not checked, because it needs real 2.x sessions: whether OpenCode 2 records the usage of a **new** compaction anywhere
+(an assistant row, or only the rollup). The v2 reconciliation of change 4 will show it.
 
 ## Design
 
@@ -66,172 +81,182 @@ If answer 1 or 2 is "no", stop and bring it back to the maintainer: the design b
 
 Each OpenCode database, the device's own and each home's, is classified when opened:
 
-- **v1**: `message`, `session` and `workspace` are ordinary tables (today's check, `HOME_TABLES_QUERY`).
-- **v2**: `session_message` and `session_v2` are ordinary tables.
-- A database can be both (converted or being converted), only one, or neither. **Neither** is "not an OpenCode
-  database", reported as today. The same view/virtual-table rule applies to the v2 names.
+- **v1 part**: `message` and `session` are ordinary tables. `workspace` is no longer read (finding 8).
+- **v2 part**: `session_v2` and `session_message` are ordinary tables. `session_message` alone is not enough
+  (finding 1).
+- A database can have both parts (converted, or being converted), one part, or neither. **Neither** means "not an
+  OpenCode database", reported as today. A view or virtual table under any of these names is rejected, as today.
 
-### Reading a v1 + v2 database without double counting
+### Reading both parts without double counting
 
-Both parts are read, each with its own watermark:
+Each part is read with its own watermark:
 
-- **v1 part:** exactly today's query and watermark keys (`watermark:opencode:time_updated`, and
-  `watermark:opencode:time_updated:<path>` for a home). A device that upgrades the agent re-reads nothing.
+- **v1 part:** today's query without the `workspace` join, with today's watermark keys
+  (`watermark:opencode:time_updated`, and `…:<path>` for a home). A device that upgrades the agent re-reads nothing.
+  `git_branch` is null, as it already is for every stored OpenCode event (finding 8).
 - **v2 part:** `session_message` joined to `session_v2`, `type = 'assistant'`, `time_updated >= ?`, with new keys
-  `watermark:opencode-v2:time_updated` and `watermark:opencode-v2:time_updated:<path>`. `resetCursors` already
-  deletes every `watermark:%`, so `backfill` resets both.
-- **A v2 row whose id is also in `message` is skipped** (`NOT EXISTS (SELECT 1 FROM message WHERE id = sm.id)`),
-  when the database has a `message` table. Converted messages therefore keep coming from v1 only. If they came from
-  v2 instead, the PK upsert would absorb them, but not unchanged: v2 has no branch, so `git_branch` would be
-  overwritten with null, `record()` would report the event `changed`, and the archive would get a second line per
-  converted message. With the anti-join nothing converted is read twice. The upsert is still the backstop, and step 2
-  of "Verification" checks that, too.
+  `watermark:opencode-v2:time_updated` and `…:<path>`. `resetCursors` deletes every `watermark:%`, so `backfill`
+  resets both.
+- **A v2 row whose id is also in `message` is skipped** (`NOT EXISTS (SELECT 1 FROM message WHERE id = sm.id)`, when
+  there is a v1 part). Converted messages are read from v1 only, for three reasons:
+  - Read from v2, they would differ from the stored event (`ts` by 1 ms, finding 5). `record()` would report them
+    `changed`, and the archive would get a second line for each of 3,322 messages.
+  - The compaction calls exist only in v1 (finding 6). Without v1 they would be missing, not doubled.
+  - Conversion writes rows with old `time_updated` values, possibly below a v2 watermark that new messages have
+    already moved past. Those rows are all in `message`, so skipping them loses nothing.
 
-  The anti-join also makes the order of conversion irrelevant to the watermarks: conversion inserts rows with old
-  `time_updated` values, possibly below a v2 watermark that new messages have already advanced. Those rows are all in
-  `message`, so skipping them loses nothing.
+  Because the ids and session ids are kept (finding 2), the primary-key upsert would still catch a converted message
+  that the anti-join missed. It would be counted as `changed`, never as a second event.
 
 ### A v2 message as an event
 
-`toEvent` gets a v2 sibling that differs only in where it reads:
+| event field     | v1                                                | v2                                       |
+|-----------------|---------------------------------------------------|------------------------------------------|
+| role filter     | `data.role === 'assistant'`                       | `type = 'assistant'` (in SQL)            |
+| `provider`      | `data.providerID`                                 | `data.model.providerID`                  |
+| `model`         | `data.modelID`                                    | `data.model.id`; `variant` not stored    |
+| `agent`         | `data.agent \|\| data.mode`                       | same                                     |
+| `project`       | `session.directory`, then plan 008's root rule    | `session_v2.directory`, same rule        |
+| `git_branch`    | null (the `workspace` join is dropped)            | null                                     |
+| `is_sidechain`  | `session.parent_id`                               | `session_v2.parent_id`                   |
+| `ts`            | `time.completed`, `time.created`, `time_updated`  | same                                     |
+| tokens          | `tokens.*`                                        | same (`total` absent, never read)        |
 
-| event field     | v1 (unchanged)                    | v2                                                 |
-|-----------------|-----------------------------------|----------------------------------------------------|
-| role filter     | `data.role === 'assistant'`       | `type` column = `'assistant'` (in SQL)             |
-| `provider`      | `data.providerID`                 | `data.model.providerID`                            |
-| `model`         | `data.modelID`                    | `data.model.id`; `variant` is not stored           |
-| `agent`         | `data.agent \|\| data.mode`       | same                                               |
-| `project`       | `session.directory`               | `session_v2.directory` (then plan 008's root rule) |
-| `git_branch`    | `workspace.branch`                | null: OpenCode 2 does not record one               |
-| `is_sidechain`  | `session.parent_id`               | `session_v2.parent_id`                             |
-| `ts`            | `time.completed`, `time.created`, `time_updated` | same                                |
-| tokens          | `tokens.*`                        | same                                               |
-
-`message_id` is the row id and `session_id` the row's `session_id`, as in v1. A home's v2 rows go through the same
-`typeof` guards as `HOME_MESSAGE_QUERY` (text ids and data, integer `time_updated` within `Number.MAX_SAFE_INTEGER`)
-and through `wellFormed`. The `variant` is dropped because nothing downstream has a column for it and, if question 2
-is answered "yes", it does not affect the model id that pricing looks up.
-
-The losing `git_branch` is accepted: it is a label, not a pricing input, and OpenCode 2 has nothing to read it from.
+`message_id` is the row id and `session_id` the row's `session_id`, in both parts. A home's v2 rows go through the
+same `typeof` guards as `HOME_MESSAGE_QUERY` (text ids, type and data, an integer `time_updated` within
+`Number.MAX_SAFE_INTEGER`) and through `wellFormed`. `variant` is dropped: it does not change the model id that
+pricing looks up (finding 3), and no column holds it.
 
 ### Price table
 
-OpenCode 2 no longer writes `models.json`, but the file stays on a device that has moved, ageing. Under plan 004 a
-stale table is permanent damage, so the agent must not keep reading the old file there.
+OpenCode 2 no longer writes `models.json`, but the file stays on a moved device and ages. Under plan 004 a stale
+table is permanent damage, so the agent must not keep using it there.
 
-`loadPricing` reads both sources the device has and uses the **fresher** one:
+`loadPricing` reads every source the device has and uses the **fresher** one:
 
 - `models.json` (`pricing.modelsJson`, unchanged), dated by its mtime, as today.
 - The catalogue in the device's own OpenCode database: new config key `pricing.catalogDb`, default
-  `~/.local/share/opencode/opencode.db`, opened read-only. Row `models-dev:v3:catalog` of `kv`, dated by `updatedAt`.
-  Its `body` is parsed as the table (decoded from a string first if question 4 says it is one).
+  `~/.local/share/opencode/opencode.db`, opened read-only. The row `key = 'models-dev:v3:catalog'` of `kv`, dated by
+  `updatedAt`, or by the row's `time_updated` (epoch ms, finding 9) when `updatedAt` cannot be read as a date. The
+  table is `body`, decoded from a string first if it is one.
 
-A source that is missing or unreadable is ignored when the other loads. When neither loads, `tableError` is set as
-today. `meta` records which source won, its path (for the database, `<path>#kv:models-dev:v3:catalog`), and its date,
-so doctor's "price table" and "price table freshness" checks report that source and date instead of `models.json`'s
-mtime. Extra homes' catalogues are not read: the price table is the device's own.
+A source that is missing, unreadable, or not in the `models.json` shape
+(`{ <providerId>: { models: { <modelKey>: { cost, … } } } }`) is ignored when the other one loads. When neither
+loads, `tableError` is set, as today. `meta` records which source won, its path (for the database
+`<path>#kv:models-dev:v3:catalog`) and its date. doctor's "price table" and "price table freshness" checks report
+that source and date, not `models.json`'s mtime. Extra homes' catalogues are not read: the price table is the
+device's own.
 
-Only the `kv` row is read. The agent never queries `credential` or any table other than those named in this plan.
+Only that `kv` row is read. The agent never queries `credential`, or any table this plan does not name.
 
 ### Doctor
 
-- **opencode db:** counts per part, e.g. `412 messages / 82 sessions (1.x), 38 messages / 3 sessions (2.x)`.
-  Passes when at least one part is present.
-- **opencode reconciliation:** the existing check on the v1 part, and the same check on the v2 part (assistant rows
-  of `session_message` summed per session against `session_v2.tokens_*`). Each part is reconciled on its own tables.
-  Do not combine them, because a converted session has its messages in both.
+- **opencode db:** counts per part, e.g. `9229 messages / 373 sessions (1.x), 70 messages / 8 sessions (2.x)`, plus
+  the conversion phase when `kv` has `migration.v1-v2` (its `phase`, as stored). It passes when at least one part is
+  present.
+- **opencode reconciliation:** v1 as today, over `session`. v2 only over the sessions that are **not** in `session`,
+  the ones OpenCode 2 created. Converted sessions are reconciled on v1 alone: their v2 rows lack the compaction
+  tokens (finding 6), but their rollups are the same in both tables. A v2 mismatch is reported like a v1 mismatch.
+  It is how a new 2.x compaction would show up if its usage is not recorded on an assistant row.
 - **models priced:** `listModels` returns the pairs of both parts.
 - **extra homes:** `readHomeDatabase` reads both parts, so the check and extraction agree, as plan 018 requires.
-- **price table** / **price table freshness:** as described above.
+- **price table** / **price table freshness:** as above.
 
 ## Changes
 
 1. `agent/src/sources/opencode.js`
-   - Replace the fixed table check with a classifier returning `{ v1, v2 }` (both booleans), used by the device's
-     own database and by `readHomeDatabase`. Neither present → the device's own database is skipped (reported by
-     doctor, not thrown in `sync`); a home's throws "not an OpenCode database: needs message, session and workspace,
-     or session_message and session_v2, as tables", as today.
-   - Add `V2_MESSAGE_QUERY` and its guarded home variant, with the anti-join when `v1` is true.
-   - Add the v2 event mapping (table above); keep `toEvent` for v1 unchanged.
+   - A classifier returning `{ v1, v2 }` (finding 1), used for the device's own database and in
+     `readHomeDatabase`. For the device's own database with neither part, nothing is yielded (doctor reports it),
+     where today `sync` throws. For a home with neither part, the error is "not an OpenCode database: needs message
+     and session, or session_v2 and session_message, as tables".
+   - Drop the `workspace` join from `MESSAGE_QUERY`, and `branch` from it and from `HOME_MESSAGE_QUERY`.
+   - Add `V2_MESSAGE_QUERY` and its guarded home variant, with the anti-join when there is a v1 part.
+   - Add the v2 event mapping, and leave the v1 `toEvent` otherwise unchanged.
    - Separate watermark keys for the v2 part, for the device's own database and per home path.
-   - `listModels` and `reconcile` handle both parts. `reconcile` returns per part, e.g. `{ v1: {...}, v2: {...} }`,
-     each `null` when that part is absent.
-   - Update the header comment: the schema notes for 1.x and 2.x, and why converted rows are read from 1.x only.
-2. `agent/src/pricing.js`: the catalogue source and the fresher-wins rule; `meta` gains `source` and `updatedAt`.
-   Update the header comment that calls `models.json` the source of truth.
-3. `agent/src/config.js`: `pricing.catalogDb` in `DEFAULTS`; `agent/config.example.json` gets the same key.
-   Pass it wherever `modelsJsonPath` is passed (`sync.js`, `cli.js` twice, `doctor.js`).
+   - `listModels` and `reconcile` cover both parts. `reconcile` returns `{ v1, v2 }`, each `null` when that part is
+     absent, with v2 limited to the sessions not in `session`. Also export a small `conversionPhase(db)` for doctor.
+   - Header comment: schema notes for 1.19.6 and 2.4.2, and why converted rows are read from v1 only (findings 5, 6).
+2. `agent/src/pricing.js`: the catalogue source and the fresher-wins rule, with `meta.source` and `meta.updatedAt`.
+   Rewrite the header comment that calls `models.json` the source of truth. **First**, look at a real
+   `models-dev:v3:catalog` row, from the maintainer's 2.4.2 test home or from the first device that moves, and record
+   its `body` and `updatedAt` types here (finding 10). If `body` is not in the `models.json` shape, stop and bring it
+   back to the maintainer. Without the row, `models.json` keeps working, so this does not block step 2 of "Order of
+   moving". It must be settled before a device moves.
+3. `agent/src/config.js`: `pricing.catalogDb` in `DEFAULTS`, and the same key in `agent/config.example.json`. Pass it
+   wherever `modelsJsonPath` is passed (`sync.js`, `cli.js` twice, `doctor.js`).
 4. `agent/src/doctor.js`: the checks listed under "Doctor". "price table freshness" stops calling `stat` on
-   `modelsJson` and uses `pricing.meta.updatedAt`; its advice ("run OpenCode to refresh it") stays.
-5. `README.md`: the data-sources diagram and text name both schemas and both price sources. One sentence that a
-   copy of an OpenCode 2 home contains its logins (`credential` table) and must be kept private.
-6. Tests (`agent/test/`, synthetic databases only, no home access):
-   - `sources.test.js`: a v2-only database yields its assistant rows with provider and model from `data.model`,
-     `git_branch` null, `is_sidechain` from `parent_id`; `user`/`idle`/`system`/`synthetic`/`compaction` rows are
-     ignored even with tokens; a second run yields nothing new.
-   - Mixed database: a message in both `message` and `session_message` is yielded once, with its v1 branch; a v2-only
-     message is yielded; the two watermarks advance independently; a converted row added later with an old
-     `time_updated` is not yielded.
-   - The device's own v2-only database no longer makes `extractOpenCode` throw; a database with neither part yields
+   `modelsJson` and uses `pricing.meta.updatedAt`. Its advice ("run OpenCode to refresh it") stays.
+5. `README.md`: the data-sources diagram and text name both schemas and both price sources. Add one sentence that a
+   copy of an OpenCode 2 home holds its logins and must be kept private.
+6. Tests (`agent/test/`, synthetic databases only, no home access). Fixture schemas are copied from findings 1, 8
+   and 9 (the 1.19.6 database with its empty `session_message` on `session`, and the 2.4.2 tables):
+   - A 1.19.6 database with an empty `session_message` is read as v1 only, exactly as today.
+   - A v2-only database yields its assistant rows, with provider and model from `data.model` and `is_sidechain`
+     from `parent_id`. `user`, `system`, `synthetic` and `compaction` rows are ignored. A second run yields nothing.
+   - A converted database, with 2.4.2's `workspace` (no `branch`) and `ts` 1 ms off in v2, yields each converted
+     message once, from v1, with v1's `ts`. A compaction message is yielded from v1. A v2-only message is yielded.
+     The two watermarks move independently. A converted row added later with an old `time_updated` is not yielded.
+   - The device's own v2-only database no longer makes `extractOpenCode` throw. A database with neither part yields
      nothing.
-   - A home with a v2-only database is read; `session_message` as a view is rejected; a v2 row with a non-text id or
-     an out-of-range `time_updated` is dropped, the others kept.
-   - `reconcile` and `listModels` on v1-only, v2-only and mixed databases.
-   - `pricing.test.js`: the catalogue loads from a `kv` fixture; the fresher source wins either way round; a missing
-     `kv` row or a malformed `body` falls back to `models.json`; neither → `tableError`.
-   - `doctor.test.js`: "opencode db", "opencode reconciliation" and "extra homes" on v2-only and mixed databases;
-     "price table freshness" dated from the catalogue.
+   - A home with a v2-only database is read, and `session_v2` as a view is rejected. A v2 row with a non-text id or
+     an out-of-range `time_updated` is dropped and the others are kept.
+   - `reconcile`: a converted session with a v2 compaction row without tokens passes on v1 and is not reconciled on
+     v2; a 2.x-native session with a short assistant sum fails. `listModels` on v1-only, v2-only and mixed databases.
+   - `pricing.test.js`: the catalogue loads from a `kv` fixture, and the fresher source wins either way round. A
+     missing row, or a `body` that is not the expected shape, falls back to `models.json`. Neither → `tableError`.
+   - `doctor.test.js`: "opencode db" (with the conversion phase), "opencode reconciliation" and "extra homes" on
+     v2-only and mixed databases, and "price table freshness" dated from the catalogue.
    - `npm test` in `agent/`, also as `HOME=$(mktemp -d) npm test`.
-7. This plan: answers to the five questions, then the `Status:` line with what was verified.
+7. This plan: the catalogue facts (change 2), then the `Status:` line with what was verified.
 
 ## Order of moving
 
-The agent change ships **before, or together with**, each move to OpenCode 2. Nothing in the agent depends on the
-move having happened, so it can ship early. Moving first means `sync` fails on a device whose own database becomes
-2.x-only (fresh install) and a moved sandbox home drops out silently.
+The agent change ships **before, or together with**, each move to OpenCode 2. The agent does not need the move to
+have happened, so it can ship early. Moving first breaks `sync` on that device as soon as conversion starts
+(finding 8), and a moved sandbox home drops out of the extra homes.
 
-1. Implement, and verify on copies (steps 1 and 2 below). OpenCode 1 still runs everywhere.
-2. Update the agent on every device that runs it, still on OpenCode 1. On each: `doctor` passes and a `sync` reports
-   0 `changed` events, so the v1 path is unchanged.
-3. Move a device to OpenCode 2 only after step 2 on that device. The same applies to the sandboxes, because the
-   device's agent reads their homes. Sandboxes and the device can move in either order once the device has the
-   updated agent.
-4. After each move: `doctor` (step 3 below).
+1. Implement, and verify on copies (steps 1 and 2 below), while OpenCode 1 still runs everywhere.
+2. Update the agent on every device that runs it, still on OpenCode 1. On each: `doctor` passes, and a `sync`
+   reports 0 `changed` events, so the v1 path is unchanged.
+3. Move a device to OpenCode 2 only after step 2 on that device, and after change 2 has its catalogue facts. The same
+   holds for the sandboxes, because the device's agent reads their homes. Once the device has the updated agent,
+   sandboxes and device can move in either order.
+4. After each move: step 3 of "Verification".
 5. Keep reading both schemas. Dropping v1 support needs its own plan, once no device or home holds a 1.x-only
    database.
 
 ## Verification
 
-Against **copies** only, never a live database. Copy with SQLite's backup (`sqlite3 <db> ".backup <copy>"`, or
-`node:sqlite`'s `backup()`), not `cp`, so a running OpenCode's WAL is included consistently. A device database can be
-several GB, so check free space first. Use a scratch config and data directory (`--no-ship`). A copy of a 2.x home
-holds credentials: keep it in a directory only the user can read and delete it afterwards.
+Against **copies** only, never a live database. Copy with SQLite's backup (`node:sqlite`'s `backup()`, or
+`sqlite3 <db> ".backup <copy>"`), not `cp`, so a running OpenCode's WAL is included. The client's database is about
+2.8 GB. Run OpenCode 2 in a scratch home with `--standalone` (otherwise it starts a background service), and with
+`HOME` and every `XDG_*_HOME` pointing into that home. Use a scratch agent config and data directory, with
+`--no-ship`. A copy of a 2.x home holds credentials: keep it in a directory only the user can read, and delete it
+afterwards.
 
-1. **Answer the five questions** on a copy of a 1.x database converted by OpenCode 2.4.2 (run OpenCode 2 with `HOME`
-   pointing at a scratch home holding the copy, until conversion is done).
-2. **Overlap**, on a fresh copy of the same 1.x database:
-   - `sync --no-ship` with the updated agent before conversion. Note the event count.
-   - Let OpenCode 2 convert part of it (stop it after one short run), `sync --no-ship`: 0 new, 0 changed.
-   - Finish the conversion, `sync --no-ship`: 0 new, 0 changed. Then `backfill` (a full re-read): 0 changed.
-   - Backstop check: with the anti-join disabled (a local edit, not committed), a `backfill` against the converted
-     copy reports no new events and the same token sums. Record how many are `changed` and why (expected: branch).
-   - Send one prompt with OpenCode 2 in the scratch home, `sync --no-ship`: exactly 1 new event per assistant
-     message, with the right provider, model and project, and priced (`priced_by` not `none` for a priced model).
-   - `doctor` with the scratch config: "opencode db", "opencode reconciliation" (both parts), "models priced", "price
-     table" and "price table freshness" (from the catalogue) pass.
-3. **On each device after it moves:** `doctor` passes; the dashboard shows new OpenCode events from that device with
-   models and projects as before the move.
-4. **Sandbox homes:** after a sandbox moves, `doctor`'s "extra homes" lists its OpenCode events and `sync` ships them.
+1. **Before conversion:** on a backup copy of a 1.x database, `sync --no-ship`, and note the event count.
+2. **Through conversion,** on the same copy:
+   - Run OpenCode 2 once (`--standalone session list` converted 8 of 373 sessions in one run), then
+     `sync --no-ship`: 0 new and 0 changed.
+   - Repeat until `migration.v1-v2` is `completed`, then `sync --no-ship`: 0 new and 0 changed. Then `backfill`:
+     0 changed, and the same event count and token sums as step 1.
+   - `doctor` with the scratch config passes "opencode db" (both parts, phase `completed`), "opencode reconciliation"
+     (v1 373/373, v2 0 sessions) and "models priced".
+3. **On each device after it moves:** `doctor` passes, including "price table freshness" from the catalogue. The
+   dashboard shows new OpenCode events from that device, with models and projects as before. After the first 2.x
+   session that compacts, "opencode reconciliation" still passes. If it fails, OpenCode 2 does not record compaction
+   usage on an assistant row, and that needs its own plan.
+4. **Sandbox homes:** after a sandbox moves, doctor's "extra homes" lists its OpenCode events, and `sync` ships them.
 
 ## Out of scope
 
-- **An OpenCode 2 plugin.** None exists here. If an event-driven sync is ever added (plan 001's optional idea), it
-  must use 2.x's plugin shape (a directory whose module default-exports `{ id, setup(ctx) }`, subscribing through
-  `ctx.event.subscribe({ types })`) and `session.execution.succeeded` / `session.execution.failed`, not
-  `session.idle`.
-- **OpenCode dropping the 1.x tables** in a later version. The v2 part would then read the converted messages. With
-  the session ids preserved they upsert onto the same events, but their `git_branch` would be overwritten with null
-  and each would be appended to the archive again as `changed`. 2.4.2 keeps the tables. Revisit when a release notes
-  their removal.
-- **Storing `variant`.** It has no column. Add one only if it turns out to change what a request costs.
-- **Branch for 2.x sessions.** OpenCode 2 does not record one, and this plan does not derive one from the directory.
+- **An OpenCode 2 plugin.** This repository has none (plan 001 mentioned a `session.idle` sync as an option that was
+  never built). If one is ever added, it must use 2.x's plugin shape (a directory whose module default-exports
+  `{ id, setup(ctx) }`, subscribing through `ctx.event.subscribe({ types })`) and the events
+  `session.execution.succeeded` / `session.execution.failed`.
+- **OpenCode dropping the 1.x tables** in a later version. The v2 part would then read the converted messages. They
+  would upsert onto the same events (finding 2), but as `changed` (finding 5), and the converted compaction calls
+  would have no usage left to read (finding 6). 2.4.2 keeps the tables. Revisit when a release notes their removal.
+- **Storing `variant`.** It does not change the model id (finding 3) and has no column. Add one only if it turns out
+  to change what a request costs.
+- **A branch for OpenCode events.** None has ever been recorded (finding 8), and 2.x has nothing to read one from.
