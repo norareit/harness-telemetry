@@ -252,8 +252,9 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
   conversion runs (2.4.2 stores a `cursor` beside it) and `completed` when it is done. It passes when at least one part
   is present.
 - **opencode reconciliation:** v1 as today, over `session`. v2 only over the sessions that are **not** in `session`,
-  the ones OpenCode 2 created. (Superseded by review finding R3: v2 covers every session.) Converted sessions are reconciled on v1 alone: their v2 rows lack the compaction
-  tokens (finding 6), but their rollups are the same in both tables. A v2 mismatch is reported like a v1 mismatch.
+  the ones OpenCode 2 created. (Superseded by review finding R3: v2 covers every session.) Converted sessions are
+  reconciled on v1 alone: their v2 rows lack the compaction tokens (finding 6), but their rollups are the same in
+  both tables. A v2 mismatch is reported like a v1 mismatch.
   It is how a new 2.x compaction would show up if its usage is not recorded on an assistant row.
 - **models priced:** `listModels` returns the pairs of both parts.
 - **extra homes:** `readHomeDatabase` reads both parts, so the check and extraction agree, as plan 018 requires.
