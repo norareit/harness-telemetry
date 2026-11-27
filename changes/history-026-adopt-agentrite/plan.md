@@ -12,6 +12,11 @@ checks below were run, since most of them need the `history-` directories. Verif
   that `process.md` read literally would give 0027, and that the kit's `agentrite-units.mjs` and `AGENTS.md`
   settle it as 0001
 - The `commit-msg` hook refused an empty test commit with a `Co-Authored-By:` trailer, and no commit was made
+- After the review findings (see "Review findings"), on `9a5cea3`: `npm test` in `agent/` 269 pass, 0 fail, on the
+  host, and the same inside the sandbox (`./sandbox.sh --in-place`, image built with `sandbox/Dockerfile`, after
+  `npm ci` in `agent/`), where `command -v rsync` printed `/usr/bin/rsync`. `npm run check-changes` exits 0. The
+  kit's image without the Dockerfile has no `rsync` (checked with `command -v`); the six failing backup tests there
+  are the reviewer's observation and were not rerun
 
 ## The task
 
@@ -144,3 +149,12 @@ unit has no `record.md`, so their outcomes are recorded here and in `Status:`. W
   "Verification" now say move first, verify second, as was done
 - **P2**: a fresh clone has no `commit-msg` hook, since git does not copy hooks. Document the fresh-clone steps in
   `AGENTS.md`: `npm ci` at the root, `npx agentrite refresh` for the hook, and `npm ci` in `agent/`
+
+Outcomes, all accepted and applied:
+
+- **C1**: `sandbox/Dockerfile` installs `rsync`, in `9a5cea3`. The suite passes inside the sandbox, as `Status:` says
+- **S1**: "Commits, tags and PRs" in `AGENTS.md` keeps the ban on "Generated with …" lines and on attribution in tag
+  messages and PR descriptions, in `9a5cea3`
+- **P1**: step 4 and "Verification" reworded, in `1eb254f`
+- **P2**: "A fresh clone" in `AGENTS.md` gives `npm ci`, `npx agentrite refresh` and `npm ci` in `agent/`, in
+  `9a5cea3`
