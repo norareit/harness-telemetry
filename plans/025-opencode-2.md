@@ -204,8 +204,12 @@ table fail to load. Converting takes the 12 MB `body` once per `loadPricing`, an
 similar size today.
 
 A source that is missing or unreadable is ignored when the other one loads. When neither loads, `tableError` is set,
-as today. `meta` records which source won, its path (for the database
-`<path>#kv:models-dev:v3:catalog`) and its date. doctor's "price table" and "price table freshness" checks report
+as today. For the catalogue, "missing" covers every way it can be absent, and each is a normal case, not an error:
+no file at `pricing.catalogDb`, a database **without a `kv` table** (every 1.19.6 database: OpenCode 2 creates the
+table), no `models-dev:v3:catalog` row, or a `body` that does not parse. Check for the table in `sqlite_master` before
+querying it, rather than relying on a `catch` around the query.
+
+`meta` records which source won, its path (for the database `<path>#kv:models-dev:v3:catalog`) and its date. doctor's "price table" and "price table freshness" checks report
 that source and date, not `models.json`'s mtime. Extra homes' catalogues are not read: the price table is the
 device's own.
 
@@ -236,7 +240,8 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
    - Add the v2 event mapping, and leave the v1 `toEvent` otherwise unchanged.
    - Separate watermark keys for the v2 part, for the device's own database and per home path.
    - `listModels` and `reconcile` cover both parts. `reconcile` returns `{ v1, v2 }`, each `null` when that part is
-     absent, with v2 limited to the sessions not in `session`. Also export a small `conversionPhase(db)` for doctor.
+     absent, with v2 limited to the sessions not in `session`. Also export a small `conversionPhase(db)` for doctor:
+     the `phase` of `kv` row `migration.v1-v2`, or null when there is no `kv` table (1.19.6) or no such row.
    - Header comment: schema notes for 1.19.6 and 2.4.2, and why converted rows are read from v1 only (findings 5, 6).
 2. `agent/src/pricing.js`: the catalogue source, the conversion of its `cost` (an exported `fromCatalogCost`), and
    the fresher-wins rule, with `meta.source` and `meta.updatedAt`. Rewrite the header comment that calls
@@ -262,8 +267,10 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
    - `reconcile`: a converted session with a v2 compaction row without tokens passes on v1 and is not reconciled on
      v2; a 2.x-native session with a short assistant sum fails. `listModels` on v1-only, v2-only and mixed databases.
    - `pricing.test.js`: the catalogue loads from a `kv` fixture whose `body` is a JSON string, and the fresher
-     source wins either way round. A missing row, or a `body` that does not parse, falls back to `models.json`.
-     Neither → `tableError`.
+     source wins either way round. Each way the catalogue can be absent falls back to `models.json`, with
+     `meta.source` naming `models.json`: no file at `pricing.catalogDb`; **a 1.19.6 database without a `kv` table**
+     (the case on every device still on 1.x); a `kv` table without the row; a `body` that does not parse. Neither
+     source → `tableError`.
    - `fromCatalogCost`, one case per rule, built from the entries quoted in findings 11 and 12: a numeric write
      (`opencode/big-pickle`), TTL writes `5m`/`1h` (`anthropic/claude-opus-5`, giving 6.25) and `30m`/`12h`
      (`openai/gpt-6.2-sol`, giving 2.5, with its 272k tier), `explicit` cache rates (`alibaba-cn/glm-5.1`, tier
@@ -272,7 +279,8 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
      `text.output.price`, which is a miss. Each expected value is the `models.json` cost quoted in the finding.
      Then a card made from a converted cost prices an event exactly like the flat one (`price` on both).
    - `doctor.test.js`: "opencode db" (with the conversion phase), "opencode reconciliation" and "extra homes" on
-     v2-only and mixed databases, and "price table freshness" dated from the catalogue.
+     v2-only and mixed databases, and "price table freshness" dated from the catalogue. "opencode db" on a 1.19.6
+     database without `kv` passes and shows no phase: `conversionPhase` returns null when the table is absent.
    - `npm test` in `agent/`, also as `HOME=$(mktemp -d) npm test`.
 7. This plan: the `Status:` line with what was verified.
 
