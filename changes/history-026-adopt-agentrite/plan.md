@@ -92,7 +92,7 @@ marked section for what is specific to the project, with these changes:
 
 ### 4. Move the plans
 
-Last, once the work above is committed and this plan's `Status:` line says what was verified:
+Once the work above is committed:
 
 - `git mv plans/NNN-<slug>.md changes/history-NNN-<slug>/plan.md` for each plan 001 to 026, keeping the three-digit
   number and the slug as they are, e.g. `plans/004-freeze-price-at-ingest.md` becomes
@@ -125,4 +125,22 @@ The plans' own text is left alone. Outside them:
 - `claude --agent specifier` starts in the repository and finds the kit's instructions
 - A test commit with a `Co-Authored-By:` trailer is refused by the hook (then not made)
 
-Record in `Status:` what was run and the results, before step 4 moves this file.
+These checks run after step 4, since most of them need the `history-` directories. Record in `Status:` what was
+run and the results, in the moved file.
+
+## Review findings
+
+The first review (of `91ce9fe`, in `.reviews/history-026-adopt-agentrite/review-91ce9fe.md`) found four things. This
+unit has no `record.md`, so their outcomes are recorded here and in `Status:`. Work added for them:
+
+- **C1** (blocking): `agent/test/backup.test.js` runs the real `rsync`, which the kit's image (`node:26-bookworm`
+  with a few packages) lacks. Add `sandbox/Dockerfile`, built on `${AGENTRITE_IMAGE}` as "Adding software to the
+  sandbox" of the kit's `SANDBOX.md` says, that installs `rsync` from bookworm's packages. Then run `npm ci` and
+  `npm test` in `agent/` inside the project's sandbox
+- **S1**: the old `AGENTS.md` also banned "Generated with …" lines and attribution in tag messages and PR
+  descriptions, which the kit's standards do not cover (they cover commit trailers). Keep that part under
+  "Commits, tags and PRs"
+- **P1**: step 4 said to record the verification before the move, while the checks need the moved paths. Step 4 and
+  "Verification" now say move first, verify second, as was done
+- **P2**: a fresh clone has no `commit-msg` hook, since git does not copy hooks. Document the fresh-clone steps in
+  `AGENTS.md`: `npm ci` at the root, `npx agentrite refresh` for the hook, and `npm ci` in `agent/`
