@@ -90,7 +90,8 @@ read-only. The scripts are not kept. The figures are:
     ```
 
     (`openai/gpt-6.2-sol`, abridged.) Of the 9,769 entries in both files, none that has a `cost` has the same one in
-    both. The 254 identical ones have no `cost` in either. Read as it is, the catalogue would price **nothing**. The variants, counted over all 10,015 costs:
+    both. The 254 identical ones have no `cost` in either. Read as it is, the catalogue would price **nothing**.
+    The variants, counted over all 10,015 costs:
     - `text.input.cache.write` is a number (1,785 entries) or an object keyed by TTL (1,056): `5m`/`1h` (Anthropic
       and others) or `30m`/`12h` (OpenAI). In 35 entries the cache rates sit under `cache.explicit.{read,write}`
       instead, and `models.json` took its `cache_write` from `explicit.write` there.
