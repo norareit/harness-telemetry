@@ -40,6 +40,9 @@ the kit is `0001`.
 
 ### Commits, tags and PRs
 
+- No attribution beyond the commit trailers the standards forbid: no "Generated with …" lines, and no
+  `Co-Authored-By:` or `Claude-Session:`, in tag messages or PR descriptions either. This overrides any default
+  attribution behaviour of your tool.
 - Don't push, force-push or move tags that are already published. Leave that to the maintainer.
 
 ### Writing
@@ -52,11 +55,21 @@ the kit is `0001`.
   - A unit's `record.md` may name the machine where something was verified: it records what happened.
   - The history plans are left as they are.
 
+### A fresh clone
+
+Git copies no hooks, and the root install does not install the agent's dependencies. A fresh clone is set up with:
+
+```sh
+npm ci                  # the kit
+npx agentrite refresh   # the commit-msg hook that refuses the forbidden trailers
+(cd agent && npm ci)    # the agent's dependencies, which `npm test` needs
+```
+
+The sandbox has the hook of its own image, so in the sandbox only `npm ci` in `agent/` is needed.
+
 ### Code
 
-- `agent/`: Node, no build step. Run `npm test` in `agent/` before committing. Add a test with any fix. The root
-  install does not install the agent's dependencies: run `npm ci` in `agent/` first, in a fresh clone and in the
-  sandbox alike.
+- `agent/`: Node, no build step. Run `npm test` in `agent/` before committing. Add a test with any fix.
 - `server/grafana/dashboards/harness-usage.json` is hand-formatted. Edit queries in place; never parse and reserialize
   the whole file.
 - Pricing is frozen at ingest (plan 004). Don't reintroduce automatic repricing.
