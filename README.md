@@ -36,7 +36,7 @@ home holds credentials: keep such a copy private.
 | `agent/scripts/` | one-off repairs for already-recorded state — see its README |
 | `server/` | `docker compose` stack for the server: Postgres + Grafana, provisioned |
 | `agent/test/` | `node --test` suite: `npm test` (no dependency, no network, no home access) |
-| `plans/` | the design and the research behind it — 001 (pipeline) → 006 (structure), each self-contained |
+| `changes/` | the AgentRite change units; `history-001-*` to `history-026-*` hold the earlier plans: the design and the research behind it — 001 (pipeline) → 006 (structure), each self-contained |
 
 ---
 
