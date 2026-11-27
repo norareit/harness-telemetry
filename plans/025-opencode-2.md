@@ -246,7 +246,7 @@ Only that `kv` row is read. The agent never queries `credential`, or any table t
   conversion runs (2.4.2 stores a `cursor` beside it) and `completed` when it is done. It passes when at least one part
   is present.
 - **opencode reconciliation:** v1 as today, over `session`. v2 only over the sessions that are **not** in `session`,
-  the ones OpenCode 2 created. Converted sessions are reconciled on v1 alone: their v2 rows lack the compaction
+  the ones OpenCode 2 created. (Superseded by review finding R3: v2 covers every session.) Converted sessions are reconciled on v1 alone: their v2 rows lack the compaction
   tokens (finding 6), but their rollups are the same in both tables. A v2 mismatch is reported like a v1 mismatch.
   It is how a new 2.x compaction would show up if its usage is not recorded on an assistant row.
 - **models priced:** `listModels` returns the pairs of both parts.
@@ -348,6 +348,56 @@ afterwards.
    session that compacts, "opencode reconciliation" still passes. If it fails, OpenCode 2 does not record compaction
    usage on an assistant row, and that needs its own plan.
 4. **Sandbox homes:** after a sandbox moves, doctor's "extra homes" lists its OpenCode events, and `sync` ships them.
+
+## Review findings (2026-11-27)
+
+A review of the implementation (commit 65be961) found three defects. Each was reproduced by the reviewer and gets a
+test that fails before its fix.
+
+### R1. An unusable catalogue can displace a working `models.json`
+
+**Broken:** `readCatalog` accepts any object as `body`, so `{}` becomes an empty table. When the value has no
+`updatedAt`, it falls back to the row's `time_updated`. Either way the catalogue can win on freshness. With `{}`, a
+billable event is stored as unpriced and `tableError` is null, so nothing reports it.
+
+**Should be:** a catalogue competes only when it is usable. It needs a finite, positive `updatedAt` of its own (epoch
+ms); the row's `time_updated` is not a substitute. After conversion, at least one model must have a `cost`. Otherwise
+the catalogue is ignored and `models.json` is used, as when it is absent.
+
+**Fix:** `readCatalog` returns either a usable catalogue or a reason. "Absent" (no file, no `kv` table, no row) is
+silent, as before. "Unusable" (a value or `body` that does not parse, no valid `updatedAt`, no priced model) is
+recorded as `meta.catalogIgnored`, and doctor's "price table" check shows it after its detail. That check still
+passes when `models.json` loaded: the table works, and "price table freshness" flags it once it ages.
+
+### R2. Conversion can erase a branch already stored
+
+**Broken:** once OpenCode 2 replaces `workspace`, the 1.x query gives `branch` NULL. A 1.x event stored with a
+branch then loses it when it is read again: the watermark's boundary row on the next sync, or every event on a
+`backfill`. `record()` reports it `changed`, which appends an archive line and updates Postgres. No database on the
+client had a branch (finding 8), but devices that were not inspected may.
+
+**Should be:** a branch that the database can no longer report is not a branch that went away. The stored one is kept.
+
+**Fix:** when a database has a 1.x part but `workspace` has no `branch` column, an event read from it with a null
+`git_branch` takes the branch of the stored event with the same key (`store.storedEvent(eventKey(ev))`), if any.
+This applies to the device's own database and to homes: `readHomeDatabase` also reports whether its database lost the
+column. Events from a database that still has the column are unchanged, and a branch that 1.x itself reports as NULL
+stays NULL.
+
+### R3. Reconciliation skips converted sessions that resume under OpenCode 2
+
+**Broken:** the 2.x check covers only sessions that are not in `session`. A converted session that resumes in
+OpenCode 2 gets new 2.x messages, and its `session_v2` rollups grow, but nothing compares the two. A fixture whose new
+usage fell short of the 2.x rollup passed.
+
+**Should be:** every `session_v2` session is reconciled against its rollup. The sum is the session's 1.x assistant
+messages (the baseline, which still holds the compaction calls' tokens), plus its 2.x assistant rows whose id is not
+in `message`. That is the same set of messages extraction reads. A session OpenCode 2 created has no 1.x messages, so
+for it this is the check as before. The 1.x check over `session` stays as it is.
+
+**Fix:** `reconcile`'s 2.x part does exactly that. Doctor's label becomes "2.x: N/M sessions reconcile (1.x
+messages plus 2.x-only messages vs session_v2 rollups)". On the converted copy of the verification, all 373
+sessions have 1.x sums equal to both rollups (finding 6), so the check passes there as before.
 
 ## Out of scope
 
