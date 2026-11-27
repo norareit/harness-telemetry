@@ -36,6 +36,8 @@
 
   "pricing": {
     "modelsJson": "~/.cache/opencode/models.json",
+    "//catalogDb": "OpenCode 2 database holding its price catalogue; the fresher source wins. null = models.json only",
+    "catalogDb": "~/.local/share/opencode/opencode.db",
     "//overrides": "null = use the bundled agent/pricing-overrides.json",
     "overrides": null
   },

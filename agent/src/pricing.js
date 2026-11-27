@@ -1,11 +1,24 @@
 // Pricing — turns a normalized token count into a USD figure, either at the
 // model's own rates (`price`) or at some other model's rates (`repriceEvent`).
 //
-// Source of truth is ~/.cache/opencode/models.json (auto-updating, covers both
-// harnesses). pricing-overrides.json fills table misses and pins rates so
-// historical rows do not reprice when the table updates.
+// The price table is the models.dev catalogue that OpenCode keeps up to date
+// (it covers both harnesses), from whichever of two places is FRESHER
+// (plans/025):
 //
-// Rates in both files are USD per 1e6 tokens.
+//   - ~/.cache/opencode/models.json, written by OpenCode 1. On a device that
+//     has moved to OpenCode 2 it stays on disk and ages, and under the freeze
+//     (plan 004) a stale table is permanent damage — hence fresher wins.
+//   - OpenCode 2's copy, in opencode.db: table `kv`, row
+//     `models-dev:v3:catalog`, `{updatedAt, digest, body}` with `body` a JSON
+//     string. Same provider → models layout, but each `cost` is in models.dev's
+//     v3 schema, which fromCatalogCost converts to models.json's flat shape.
+//     A 1.x database has no `kv` table at all: that is the normal case for a
+//     device still on OpenCode 1, never an error.
+//
+// pricing-overrides.json fills table misses and pins rates so historical rows
+// do not reprice when the table updates.
+//
+// Rates in all of these are USD per 1e6 tokens.
 //
 // --- Semantics (see plans/002-counterfactual-repricing.md) -------------------
 //
@@ -34,12 +47,25 @@
 //   Some have MORE THAN ONE tier (e.g. qwen3-coder-plus at 32k and 128k), so we
 //   select the HIGHEST tier whose size is exceeded, not `tiers[0]`.
 
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { expandHome } from "./config.js";
 
 const DEFAULT_MODELS_JSON = "~/.cache/opencode/models.json";
+const CATALOG_KEY = "models-dev:v3:catalog";
 
-export async function loadPricing({ modelsJsonPath, overridesPath } = {}) {
+/**
+ * Load the price table and the overrides.
+ *
+ * `catalogDbPath` is OpenCode's database, read for its catalogue; without it
+ * only models.json is read. `meta` says which source won: `source`
+ * ('models.json' | 'catalog' | null), `modelsPath` (its path; for the
+ * catalogue `<db>#kv:models-dev:v3:catalog`), `updatedAt` (epoch ms: the
+ * file's mtime, or the catalogue's own updatedAt) and `tableError` (set only
+ * when neither source loads).
+ */
+export async function loadPricing({ modelsJsonPath, catalogDbPath, overridesPath } = {}) {
   const modelsPath = expandHome(modelsJsonPath || DEFAULT_MODELS_JSON);
   const ovPath = expandHome(
     overridesPath || new URL("../pricing-overrides.json", import.meta.url).pathname,
@@ -47,10 +73,23 @@ export async function loadPricing({ modelsJsonPath, overridesPath } = {}) {
 
   let table = {};
   let tableError = null;
+  let source = null;
+  let path = modelsPath;
+  let updatedAt = null;
   try {
+    const st = await stat(modelsPath);
     table = JSON.parse(await readFile(modelsPath, "utf8"));
+    source = "models.json";
+    updatedAt = st.mtimeMs;
   } catch (err) {
     tableError = err;
+  }
+
+  const catalog = catalogDbPath ? readCatalog(expandHome(catalogDbPath)) : null;
+  if (catalog && (source === null || catalog.updatedAt > updatedAt)) {
+    ({ table, updatedAt, path } = catalog);
+    source = "catalog";
+    tableError = null;
   }
 
   let overrides = {};
@@ -61,7 +100,145 @@ export async function loadPricing({ modelsJsonPath, overridesPath } = {}) {
     // overrides are optional
   }
 
-  return new Pricing(table, overrides, { modelsPath, tableError });
+  return new Pricing(table, overrides, { modelsPath: path, source, updatedAt, tableError });
+}
+
+/**
+ * OpenCode 2's catalogue from its database, converted to models.json's shape,
+ * or null whenever it is absent: no file, not a database, no `kv` table (every
+ * 1.x database), no catalogue row, or a value that does not parse. The table
+ * is looked up before it is queried, so the common 1.x case is a plain answer
+ * rather than a caught error.
+ */
+function readCatalog(dbPath) {
+  if (!existsSync(dbPath)) return null;
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const hasKv = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv'")
+      .get();
+    if (!hasKv) return null;
+    const row = db.prepare("SELECT value, time_updated FROM kv WHERE key = ?").get(CATALOG_KEY);
+    if (!row || typeof row.value !== "string") return null;
+    const value = JSON.parse(row.value);
+    const body = typeof value?.body === "string" ? JSON.parse(value.body) : value?.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+    const updatedAt = Number.isFinite(value.updatedAt) ? value.updatedAt : Number(row.time_updated) || 0;
+    return { table: fromCatalog(body), updatedAt, path: `${dbPath}#kv:${CATALOG_KEY}` };
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
+}
+
+// Converts every entry's cost in place: `body` was parsed for this call alone.
+// pricing.js reads nothing of an entry but `cost`.
+function fromCatalog(body) {
+  for (const provider of Object.values(body)) {
+    const models = provider && typeof provider === "object" ? provider.models : null;
+    if (!models || typeof models !== "object") continue;
+    for (const entry of Object.values(models)) {
+      if (!entry || typeof entry !== "object") continue;
+      const cost = fromCatalogCost(entry.cost);
+      if (cost) entry.cost = cost;
+      else delete entry.cost;
+    }
+  }
+  return body;
+}
+
+// Cache-write TTLs, shortest first: OpenCode reports one cache-write counter,
+// billed at the default (shortest) TTL, as models.json did. Anthropic's 1-hour
+// rate is the 2x-input rule in computeCost, which the catalogue agrees with.
+const WRITE_TTLS = ["5m", "30m", "1h", "12h"];
+
+/**
+ * A models.dev v3 catalogue `cost` in models.json's flat shape
+ * ({input, output, cache_read?, cache_write?, tiers?}), or null when it has no
+ * text input and output price or holds a rate that is not a number — a table
+ * miss, like an entry without a cost.
+ *
+ * Kept: `text` rates and the context tiers among its `overrides`. Ignored, as
+ * models.json had no equivalent and events carry nothing to apply them to:
+ * overrides on any other condition (service tier, time of day, region, ...),
+ * `multipliers`, `web_search`, `image`, `audio`, `video`,
+ * `text.output.reasoning` (reasoning bills at the output rate, plan 002) and
+ * `cache.storage`. These rules reproduce models.json for 9,418 of the 9,420
+ * models priced in both (plans/025, finding 12).
+ */
+export function fromCatalogCost(cost) {
+  const input = cost?.text?.input;
+  const output = cost?.text?.output;
+  if (!isObject(input) || !isObject(output)) return null;
+  try {
+    const flat = flatRates(input, output, null);
+    if (!flat) return null;
+
+    // One tier per context size, from the input and output overrides.
+    const bySize = new Map();
+    for (const [side, list] of [["input", input.overrides], ["output", output.overrides]]) {
+      if (!Array.isArray(list)) continue;
+      for (const o of list) {
+        const size = contextSize(o?.when);
+        if (size == null) continue;
+        if (!bySize.has(size)) bySize.set(size, { input: {}, output: {} });
+        bySize.get(size)[side] = o;
+      }
+    }
+    const tiers = [...bySize]
+      .sort((a, b) => a[0] - b[0])
+      .map(([size, o]) => ({ ...flatRates(o.input, o.output, flat), tier: { type: "context", size } }));
+    if (tiers.length) flat.tiers = tiers;
+    return flat;
+  } catch {
+    return null;
+  }
+}
+
+// Rates of one input/output pair. A price the pair leaves out is the base's
+// (an override may give only a cache rate); cache rates are the pair's own, as
+// in models.json's tiers. Throws on a rate that is present but not a number.
+function flatRates(input, output, base) {
+  const price = (v, fallback) => (v == null ? fallback : rate(v));
+  const out = {
+    input: price(input.price, base?.input),
+    output: price(output.price, base?.output),
+  };
+  if (out.input == null || out.output == null) return null;
+  const cache = isObject(input.cache) ? input.cache : {};
+  const explicit = isObject(cache.explicit) ? cache.explicit : {};
+  if (cache.read != null) out.cache_read = rate(cache.read);
+  const write = cacheWrite(cache.write) ?? cacheWrite(explicit.write);
+  if (write != null) out.cache_write = write;
+  return out;
+}
+
+function cacheWrite(w) {
+  if (w == null) return undefined;
+  if (!isObject(w)) return rate(w);
+  for (const ttl of WRITE_TTLS) if (w[ttl] != null) return rate(w[ttl]);
+  return undefined;
+}
+
+// `{context: {gt: N}}` or `{context: {gte: N}}` and nothing else; gte is taken
+// as gt, one token apart.
+function contextSize(when) {
+  if (!isObject(when) || Object.keys(when).length !== 1 || !isObject(when.context)) return null;
+  const n = when.context.gt ?? when.context.gte;
+  return Number.isFinite(n) ? n : null;
+}
+
+function rate(v) {
+  if (!Number.isFinite(v)) throw new TypeError("not a rate");
+  return v;
+}
+
+function isObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 export class Pricing {

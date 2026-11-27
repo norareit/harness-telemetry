@@ -200,6 +200,7 @@ async function cmdReprice() {
   const config = await loadConfig();
   const pricing = await loadPricing({
     modelsJsonPath: config.pricing.modelsJson,
+    catalogDbPath: config.pricing.catalogDb,
     overridesPath: config.pricing.overrides,
   });
   const store = new LocalStore();
@@ -334,6 +335,7 @@ async function cmdCompare() {
   const config = await loadConfig();
   const pricing = await loadPricing({
     modelsJsonPath: config.pricing.modelsJson,
+    catalogDbPath: config.pricing.catalogDb,
     overridesPath: config.pricing.overrides,
   });
 

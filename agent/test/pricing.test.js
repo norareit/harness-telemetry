@@ -2,8 +2,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Pricing, loadPricing, hasTokens } from "../src/pricing.js";
-import { table, event } from "./helpers.js";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Pricing, loadPricing, hasTokens, fromCatalogCost } from "../src/pricing.js";
+import { table, event, openCodeDb } from "./helpers.js";
 
 const price = (entries, ev, billing = "free", overrides = {}) =>
   new Pricing(table(entries), overrides).price(ev, billing);
@@ -214,4 +217,216 @@ test("hasTokens is false only when every priced token field is zero (plan 024)",
   ]) {
     assert.equal(hasTokens(event({ [f]: 1 })), true, f);
   }
+});
+
+// --- the OpenCode 2 catalogue (plan 025) -------------------------------------
+
+// Catalogue costs as OpenCode 2.4.2 stores them, each next to the models.json
+// cost OpenCode 1.19.6 wrote for the same model on the same day (plan 025,
+// findings 11 and 12). Only the shape differs; the rates are the same.
+const CATALOG_CASES = {
+  "numeric cache write (opencode/big-pickle)": [
+    { text: { input: { price: 0, cache: { read: 0, write: 0 } }, output: { price: 0 } } },
+    { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+  ],
+  "5m/1h writes take 5m; multipliers ignored (anthropic/claude-opus-5)": [
+    {
+      text: { input: { price: 5, cache: { read: 0.5, write: { "5m": 6.25, "1h": 10 } } }, output: { price: 25 } },
+      web_search: { price: 10 },
+      multipliers: [{ when: { service_tier: { equals: "fast" } }, factor: { text: 2 } }],
+    },
+    { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+  ],
+  "30m/12h writes take 30m, with a context tier (openai/gpt-6.2-sol)": [
+    {
+      text: {
+        input: {
+          price: 2,
+          cache: { read: 0.1, write: { "30m": 2.5, "12h": 5 } },
+          overrides: [
+            { when: { context: { gt: 272000 } }, price: 4, cache: { read: 0.2, write: { "30m": 5, "12h": 10 } } },
+          ],
+        },
+        output: { price: 10, overrides: [{ when: { context: { gt: 272000 } }, price: 15 }] },
+      },
+      multipliers: [{ when: { service_tier: { equals: "priority" } }, factor: { text: 2 } }],
+    },
+    {
+      input: 2, output: 10, cache_read: 0.1, cache_write: 2.5,
+      tiers: [{ input: 4, output: 15, cache_read: 0.2, cache_write: 5, tier: { type: "context", size: 272000 } }],
+    },
+  ],
+  "explicit cache write (alibaba-cn/glm-5.1)": [
+    {
+      text: {
+        input: {
+          price: 0.825,
+          cache: { read: 0.165, explicit: { read: 0.0825, write: 1.03125 } },
+          overrides: [
+            {
+              when: { context: { gt: 32000 } },
+              price: 1.1,
+              cache: { read: 0.22, explicit: { read: 0.11, write: 1.375 } },
+            },
+          ],
+        },
+        output: { price: 3.301, overrides: [{ when: { context: { gt: 32000 } }, price: 3.851 }] },
+      },
+    },
+    {
+      input: 0.825, output: 3.301, cache_read: 0.165, cache_write: 1.03125,
+      tiers: [
+        { input: 1.1, output: 3.851, cache_read: 0.22, cache_write: 1.375, tier: { type: "context", size: 32000 } },
+      ],
+    },
+  ],
+  "an override with only a cache rate keeps the base prices (nodecode/nodecode-cyber-v1)": [
+    {
+      text: {
+        input: {
+          price: 0.33,
+          cache: { read: 0.009 },
+          overrides: [{ when: { context: { gt: 262144 } }, cache: { read: 0.036 } }],
+        },
+        output: { price: 1.32 },
+      },
+    },
+    {
+      input: 0.33, output: 1.32, cache_read: 0.009,
+      tiers: [{ input: 0.33, output: 1.32, cache_read: 0.036, tier: { type: "context", size: 262144 } }],
+    },
+  ],
+  "overrides on anything but context are ignored": [
+    {
+      text: {
+        input: {
+          price: 1,
+          overrides: [
+            { when: { service_tier: { equals: "priority" } }, price: 2 },
+            { when: { context: { gt: 1000 }, region: { equals: "us" } }, price: 3 },
+            { when: { context: { gte: 5000 } }, price: 4 },
+          ],
+        },
+        output: { price: 2, overrides: [{ when: { utc_hours: { gte: "01:00" } }, price: 9 }] },
+      },
+    },
+    { input: 1, output: 2, tiers: [{ input: 4, output: 2, tier: { type: "context", size: 5000 } }] },
+  ],
+};
+
+for (const [name, [catalog, flat]] of Object.entries(CATALOG_CASES)) {
+  test(`fromCatalogCost: ${name}`, () => {
+    assert.deepEqual(fromCatalogCost(catalog), flat);
+  });
+}
+
+test("fromCatalogCost: no text price, a non-numeric rate, or no cost at all is a miss", () => {
+  assert.equal(fromCatalogCost({ text: { input: { price: 1 } } }), null);
+  assert.equal(fromCatalogCost({ text: { input: { price: 1, cache: { read: "0.1" } }, output: { price: 2 } } }), null);
+  assert.equal(fromCatalogCost({ image: { output: { price: 1 } } }), null);
+  assert.equal(fromCatalogCost(undefined), null);
+  assert.equal(fromCatalogCost("2/10"), null);
+});
+
+test("fromCatalogCost: a converted cost prices an event exactly like the flat one, tier included", () => {
+  const [catalog, flat] = CATALOG_CASES["30m/12h writes take 30m, with a context tier (openai/gpt-6.2-sol)"];
+  const a = new Pricing(table({ "openai/gpt-6.2-sol": fromCatalogCost(catalog) }), {});
+  const b = new Pricing(table({ "openai/gpt-6.2-sol": flat }), {});
+  for (const input_tokens of [100_000, 300_000]) {
+    const ev = event({ provider: "openai", model: "gpt-6.2-sol", input_tokens, output_tokens: 2000,
+      reasoning_tokens: 500, cache_read_tokens: 40_000, cache_write_5m_tokens: 1000 });
+    assert.deepEqual(a.price(ev), b.price(ev));
+  }
+});
+
+// A catalogue row as 2.4.2 writes it: `body` is a JSON string.
+function catalogValue(updatedAt, costs) {
+  const body = {};
+  for (const [key, cost] of Object.entries(costs)) {
+    const [provider, ...rest] = key.split("/");
+    body[provider] ??= { id: provider, name: provider, env: [], models: {} };
+    body[provider].models[rest.join("/")] = { id: rest.join("/"), name: key, cost };
+  }
+  return { updatedAt, digest: "d", body: JSON.stringify(body) };
+}
+
+function pricingSources(t, { modelsAgeDays = 1, catalog } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "harness-pricing-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const modelsJson = join(dir, "models.json");
+  writeFileSync(modelsJson, JSON.stringify(table({ "openai/gpt-6.2-sol": { input: 2, output: 10 } })));
+  const when = new Date(Date.now() - modelsAgeDays * 86_400_000);
+  utimesSync(modelsJson, when, when);
+  const catalogDb = join(dir, "opencode.db");
+  if (catalog) catalog(catalogDb);
+  return { modelsJson, catalogDb };
+}
+
+const v2Catalog = (ageDays, input = 3) => (path) =>
+  openCodeDb(path, {
+    v1: false,
+    v2: true,
+    kv: { "models-dev:v3:catalog": catalogValue(Date.now() - ageDays * 86_400_000, {
+      "openai/gpt-6.2-sol": { text: { input: { price: input }, output: { price: 10 } } },
+    }) },
+  });
+
+test("loadPricing: the catalogue wins when it is fresher than models.json, and is converted", async (t) => {
+  const s = pricingSources(t, { modelsAgeDays: 5, catalog: v2Catalog(1) });
+  const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+  assert.equal(p.meta.source, "catalog");
+  assert.equal(p.meta.modelsPath, `${s.catalogDb}#kv:models-dev:v3:catalog`);
+  assert.ok(Date.now() - p.meta.updatedAt < 2 * 86_400_000);
+  assert.equal(p.meta.tableError, null);
+  assert.deepEqual(p.resolve("openai", "gpt-6.2-sol").card.base, {
+    input: 3, output: 10, cache_read: null, cache_write: null,
+  });
+});
+
+test("loadPricing: models.json wins when it is fresher than the catalogue", async (t) => {
+  const s = pricingSources(t, { modelsAgeDays: 1, catalog: v2Catalog(5) });
+  const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+  assert.equal(p.meta.source, "models.json");
+  assert.equal(p.meta.modelsPath, s.modelsJson);
+  assert.equal(p.resolve("openai", "gpt-6.2-sol").card.base.input, 2);
+});
+
+// Every way the catalogue can be absent is a normal case, never a price-table
+// error: on a device still on OpenCode 1 it is absent every time.
+const ABSENT = {
+  "no file at catalogDb": () => {},
+  "a 1.19.6 database, which has no kv table": (path) => openCodeDb(path, {}),
+  "a kv table without the catalogue row": (path) =>
+    openCodeDb(path, { v1: false, v2: true, kv: { "migration.v1-v2": { phase: "completed" } } }),
+  "a body that does not parse": (path) =>
+    openCodeDb(path, {
+      v1: false, v2: true, kv: { "models-dev:v3:catalog": { updatedAt: Date.now(), body: "{not json" } },
+    }),
+  "a file that is not a database": (path) => writeFileSync(path, "not a database".repeat(20)),
+};
+
+for (const [name, make] of Object.entries(ABSENT)) {
+  test(`loadPricing: ${name} falls back to models.json`, async (t) => {
+    const s = pricingSources(t, { catalog: make });
+    const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+    assert.equal(p.meta.tableError, null);
+    assert.equal(p.meta.source, "models.json");
+    assert.equal(p.meta.modelsPath, s.modelsJson);
+    assert.equal(p.resolve("openai", "gpt-6.2-sol").source, "table");
+  });
+}
+
+test("loadPricing: with neither source the table fails to load, as before", async (t) => {
+  const s = pricingSources(t, { catalog: ABSENT["a 1.19.6 database, which has no kv table"] });
+  const p = await loadPricing({ modelsJsonPath: join(s.catalogDb, "..", "missing.json"), catalogDbPath: s.catalogDb });
+  assert.ok(p.meta.tableError);
+  assert.equal(p.meta.source, null);
+  assert.equal(p.meta.updatedAt, null);
+});
+
+test("loadPricing: without catalogDbPath only models.json is read, dated by its mtime", async (t) => {
+  const s = pricingSources(t, { modelsAgeDays: 3, catalog: v2Catalog(0) });
+  const p = await loadPricing({ modelsJsonPath: s.modelsJson });
+  assert.equal(p.meta.source, "models.json");
+  assert.ok(Math.abs(Date.now() - p.meta.updatedAt - 3 * 86_400_000) < 60_000);
 });

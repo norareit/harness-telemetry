@@ -10,7 +10,7 @@ import { redactDsn, overrideDrift, CHECKS, CHECK_NAMES } from "../src/doctor.js"
 import { Pricing } from "../src/pricing.js";
 import { LocalStore } from "../src/local-store.js";
 import { projectRootOf } from "../src/project.js";
-import { table, event } from "./helpers.js";
+import { table, event, openCodeDb, ocData1, ocData2 } from "./helpers.js";
 
 // The registry's payoff: a single check runs against a hand-built context, with
 // no config file, no network, no env fiddling.
@@ -418,4 +418,111 @@ test("check 'extra homes': a database whose message is a view, not a table, fail
   const r = await check("extra homes")(f.ctx([{ home: f.home }]));
   assert.equal(r.ok, false);
   assert.match(r.detail, /cannot read .*opencode\.db: not an OpenCode database/);
+});
+
+// --- OpenCode 2 (plan 025) -------------------------------------------------
+
+function ocDoctorDb(t, spec) {
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return openCodeDb(join(dir, "opencode.db"), spec);
+}
+const ocCtx = (ocDb) => ({ ocEnabled: true, ocDb });
+const ROLL = {
+  tokens_input: 100, tokens_output: 10, tokens_reasoning: 5, tokens_cache_read: 1000, tokens_cache_write: 50,
+};
+
+test("check 'opencode db': a 1.19.6 database without kv passes and shows no conversion phase", (t) => {
+  const path = ocDoctorDb(t, { sessions: [{ id: "s1" }], messages: [{ id: "m1", session_id: "s1", data: ocData1() }] });
+  const r = check("opencode db")(ocCtx(path));
+  assert.equal(r.ok, true);
+  assert.equal(r.detail, `1 messages / 1 sessions (1.x) at ${path}`);
+});
+
+test("check 'opencode db': counts both parts of a converted database, with its phase", (t) => {
+  const path = ocDoctorDb(t, {
+    v2: true,
+    sessions: [{ id: "s1" }],
+    sessionsV2: [{ id: "s1" }, { id: "n1" }],
+    messages: [{ id: "m1", session_id: "s1", data: ocData1() }],
+    messagesV2: [
+      { id: "m1", session_id: "s1", data: ocData2() },
+      { id: "u1", session_id: "n1", type: "user", data: {} },
+    ],
+    kv: { "migration.v1-v2": { phase: "completed" } },
+  });
+  const r = check("opencode db")(ocCtx(path));
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.detail,
+    `1 messages / 1 sessions (1.x), 2 messages / 2 sessions (2.x, conversion completed) at ${path}`,
+  );
+});
+
+test("check 'opencode db': a 2.x-only database passes; one with neither part fails", (t) => {
+  const v2 = ocDoctorDb(t, { v1: false, v2: true, sessionsV2: [{ id: "n1" }] });
+  const ok = check("opencode db")(ocCtx(v2));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.detail, `0 messages / 1 sessions (2.x) at ${v2}`);
+
+  const dir = mkdtempSync(join(tmpdir(), "harness-usage-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const other = join(dir, "other.db");
+  const db = new DatabaseSync(other);
+  db.exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)");
+  db.close();
+  const bad = check("opencode db")(ocCtx(other));
+  assert.equal(bad.ok, false);
+  assert.match(bad.detail, /not an OpenCode database/);
+});
+
+test("check 'opencode reconciliation': converted sessions on 1.x, new ones on 2.x", (t) => {
+  const spec = (n2Input) => ({
+    v2: true,
+    sessions: [{ id: "s1", ...ROLL }],
+    sessionsV2: [{ id: "s1", ...ROLL }, { id: "n1", ...ROLL, tokens_input: n2Input }],
+    messages: [{ id: "m1", session_id: "s1", data: ocData1() }],
+    // The converted session's 2.x copy has lost its tokens (a compaction row): not reconciled on 2.x.
+    messagesV2: [
+      { id: "m1", session_id: "s1", type: "compaction", data: { status: "completed" } },
+      { id: "a1", session_id: "n1", data: ocData2() },
+    ],
+  });
+  const good = check("opencode reconciliation")(ocCtx(ocDoctorDb(t, spec(100))));
+  assert.equal(good.ok, true);
+  assert.equal(
+    good.detail,
+    "1.x: 1/1 sessions reconcile per-message sums vs rollup columns; " +
+      "2.x: 1/1 sessions created by OpenCode 2 reconcile",
+  );
+  const bad = check("opencode reconciliation")(ocCtx(ocDoctorDb(t, spec(101))));
+  assert.equal(bad.ok, false);
+  assert.match(bad.detail, /2\.x: 0\/1 sessions created by OpenCode 2 reconcile — first mismatch: .*"n1"/);
+});
+
+test("check 'extra homes': a home with a 2.x-only database is read", async (t) => {
+  const f = homeFixture(t);
+  rmSync(join(f.ocDir, "opencode.db"));
+  openCodeDb(join(f.ocDir, "opencode.db"), {
+    v1: false,
+    v2: true,
+    sessionsV2: [{ id: "n1", directory: "/work" }],
+    messagesV2: [{ id: "a1", session_id: "n1", data: ocData2() }],
+  });
+  const r = await check("extra homes")(f.ctx([{ home: f.home }]));
+  assert.equal(r.ok, true);
+  assert.match(r.detail, /1 opencode events/);
+});
+
+test("check 'price table freshness': dated from the source that won, catalogue or models.json", () => {
+  const meta = (days, modelsPath) => ({ pricing: { meta: { updatedAt: Date.now() - days * 86_400_000, modelsPath } } });
+  const fresh = check("price table freshness")(meta(2, "/db#kv:models-dev:v3:catalog"));
+  assert.equal(fresh.ok, true);
+  assert.match(fresh.detail, /^\/db#kv:models-dev:v3:catalog last updated 2\.0 days ago$/);
+  const stale = check("price table freshness")(meta(20, "/m/models.json"));
+  assert.equal(stale.ok, false);
+  assert.match(stale.detail, /20\.0 days ago — run OpenCode to refresh it/);
+  const none = check("price table freshness")({ pricing: { meta: { updatedAt: null, modelsPath: "/m/models.json" } } });
+  assert.equal(none.ok, false);
+  assert.match(none.detail, /no price table loaded/);
 });

@@ -11,15 +11,13 @@
 // doctor and extraction cannot disagree (review finding C7).
 
 import { existsSync, lstatSync, statSync } from "node:fs";
-import { stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
-import { DatabaseSync } from "node:sqlite";
 import { loadConfig, expandHome, CONFIG_PATH, DATA_DIR } from "./config.js";
 import { LocalStore } from "./local-store.js";
 import { loadPricing, hasTokens } from "./pricing.js";
 import { PostgresSink } from "./sink-postgres.js";
-import { reconcile, listModels, readHomeDatabase } from "./sources/opencode.js";
+import { reconcile, listModels, readHomeDatabase, describeDatabase } from "./sources/opencode.js";
 import { parseRecord, providerOf, listTranscripts, countHomeEvents } from "./sources/claude-code.js";
 import { projectRootOf } from "./project.js";
 import { databaseInHome, expandHomes, fileInHome, homeInputPath } from "./homes.js";
@@ -81,6 +79,7 @@ export async function runDoctor({ only = null } = {}) {
   // Loaded up front: the reasoning probe prices thinking tokens with it.
   const pricing = await loadPricing({
     modelsJsonPath: config.pricing.modelsJson,
+    catalogDbPath: config.pricing.catalogDb,
     overridesPath: config.pricing.overrides,
   });
   const store = new LocalStore();
@@ -194,27 +193,45 @@ async function checkClaudeCodeDedupe(ctx) {
 function checkOpenCodeDb(ctx) {
   if (!ctx.ocEnabled) return null;
   if (!existsSync(ctx.ocDb)) return { ok: false, detail: `path not found: ${ctx.ocDb}` };
+  // plans/025: a 1.x part, a 2.x part (OpenCode 2), or both while and after
+  // OpenCode 2 converts a 1.x database.
   try {
-    const db = new DatabaseSync(ctx.ocDb, { readOnly: true });
-    const msgs = db.prepare("SELECT COUNT(*) c FROM message").get().c;
-    const sess = db.prepare("SELECT COUNT(*) c FROM session").get().c;
-    db.close();
-    return { ok: true, detail: `${msgs} messages / ${sess} sessions at ${ctx.ocDb}` };
+    const d = describeDatabase(ctx.ocDb);
+    const parts = [];
+    if (d.v1) parts.push(`${d.v1.messages} messages / ${d.v1.sessions} sessions (1.x)`);
+    if (d.v2) {
+      const phase = d.phase ? `, conversion ${d.phase}` : "";
+      parts.push(`${d.v2.messages} messages / ${d.v2.sessions} sessions (2.x${phase})`);
+    }
+    return { ok: true, detail: `${parts.join(", ")} at ${ctx.ocDb}` };
   } catch (err) {
     return { ok: false, detail: `cannot read ${ctx.ocDb}: ${err.message}` };
   }
 }
 
+// plans/025: 1.x over `session`, 2.x over the sessions OpenCode 2 created. A
+// converted session is reconciled on 1.x alone — its 2.x copy lacks the tokens
+// of its compaction calls, while its rollups are the same in both tables.
 function checkOpenCodeReconciliation(ctx) {
   if (!ctx.ocEnabled || !existsSync(ctx.ocDb)) return null;
   const rec = reconcile(ctx.ocDb);
+  const parts = [];
+  let ok = true;
+  let firstMismatch = null;
+  for (const [part, label] of [
+    ["v1", "1.x: %s sessions reconcile per-message sums vs rollup columns"],
+    ["v2", "2.x: %s sessions created by OpenCode 2 reconcile"],
+  ]) {
+    const r = rec[part];
+    if (!r) continue;
+    if (r.ok !== r.total) ok = false;
+    firstMismatch ??= r.mismatches[0] ?? null;
+    parts.push(label.replace("%s", `${r.ok}/${r.total}`));
+  }
+  if (!parts.length) return { ok: false, detail: `no OpenCode tables in ${ctx.ocDb}` };
   return {
-    ok: rec.ok === rec.total,
-    detail:
-      `${rec.ok}/${rec.total} sessions reconcile per-message sums vs rollup columns` +
-      (rec.mismatches.length
-        ? ` — first mismatch: ${JSON.stringify(rec.mismatches[0])}`
-        : ""),
+    ok,
+    detail: parts.join("; ") + (firstMismatch ? ` — first mismatch: ${JSON.stringify(firstMismatch)}` : ""),
   };
 }
 
@@ -320,11 +337,13 @@ function checkCostReproducible(ctx) {
 }
 
 // Under the freeze a stale table is PERMANENT damage: every event ingested while
-// it is stale is valued wrongly forever. models.json is maintained by OpenCode.
-async function checkPriceTableFreshness(ctx) {
-  const modelsPath = expandHome(ctx.config.pricing.modelsJson);
-  const st = await stat(modelsPath);
-  const days = (Date.now() - st.mtimeMs) / 86_400_000;
+// it is stale is valued wrongly forever. The table is maintained by OpenCode,
+// and judged by the source that won (plans/025): models.json's mtime, or the
+// catalogue's own updatedAt.
+function checkPriceTableFreshness(ctx) {
+  const { updatedAt, modelsPath } = ctx.pricing.meta;
+  if (updatedAt == null) return { ok: false, detail: `no price table loaded (${modelsPath})` };
+  const days = (Date.now() - updatedAt) / 86_400_000;
   return {
     ok: days <= 14,
     detail:

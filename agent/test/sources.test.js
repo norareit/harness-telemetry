@@ -10,8 +10,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { LocalStore } from "../src/local-store.js";
 import { extractClaudeCode } from "../src/sources/claude-code.js";
-import { extractOpenCode as _oc, reconcile as _rec } from "../src/sources/opencode.js";
+import {
+  extractOpenCode as _oc, reconcile as _rec, readHomeDatabase, listModels,
+} from "../src/sources/opencode.js";
 import { projectRootOf } from "../src/project.js";
+import { openCodeDb, ocData1, ocData2 } from "./helpers.js";
 
 // Every tmp dir this file makes is tracked and removed after the run — these
 // helpers are not handed a test context, so a single top-level after() is the
@@ -266,7 +269,7 @@ test("OC: reconcile reports ok===total when rollups match, and lists a mismatch"
     sessions: [{ id: "s1", tokens_input: 100, tokens_output: 10, tokens_reasoning: 5, tokens_cache_read: 1000, tokens_cache_write: 50 }],
     messages: [{ id: "m1", session_id: "s1", time_updated: 1, data: ocData() }],
   });
-  const okr = _rec(match.path);
+  const okr = _rec(match.path).v1;
   assert.equal(okr.ok, okr.total);
   assert.equal(okr.mismatches.length, 0);
 
@@ -274,8 +277,224 @@ test("OC: reconcile reports ok===total when rollups match, and lists a mismatch"
     sessions: [{ id: "s1", tokens_input: 101, tokens_output: 10, tokens_reasoning: 5, tokens_cache_read: 1000, tokens_cache_write: 50 }],
     messages: [{ id: "m1", session_id: "s1", time_updated: 1, data: ocData() }],
   });
-  const badr = _rec(off.path);
+  const badr = _rec(off.path).v1;
   assert.equal(badr.mismatches.length, 1);
+});
+
+// --- OpenCode 2 (plan 025) -------------------------------------------------
+
+const oc2Path = (spec) => openCodeDb(join(mkTmp(), "opencode.db"), spec);
+const oc2Run = (path, store = ocStore(), full = false) =>
+  collect(_oc({ store, config: { sources: { opencode: { db: path } } }, full }));
+const ROLL = {
+  tokens_input: 100, tokens_output: 10, tokens_reasoning: 5, tokens_cache_read: 1000, tokens_cache_write: 50,
+};
+const ROLL2 = Object.fromEntries(Object.entries(ROLL).map(([k, v]) => [k, 2 * v])); // two messages
+
+test("OC2: a 1.19.6 database, with its empty session_message, is read as 1.x exactly as before", async () => {
+  const path = oc2Path({
+    sessions: [{ id: "s1", directory: "/proj", workspace_id: "ws1" }],
+    workspaces: [{ id: "ws1", branch: "main" }],
+    messages: [{ id: "m1", session_id: "s1", time_updated: 100, data: ocData1() }],
+  });
+  const store = ocStore();
+  const events = await oc2Run(path, store);
+  assert.deepEqual(events.map((e) => [e.message_id, e.model, e.git_branch]), [["m1", "gpt-6.2-sol", "main"]]);
+  assert.equal(store.getKV("watermark:opencode-v2:time_updated"), null);
+});
+
+test("OC2: a 2.x-only database yields its assistant rows, model from data.model, other types ignored", async () => {
+  const path = oc2Path({
+    v1: false,
+    v2: true,
+    sessionsV2: [{ id: "s1", directory: "/proj" }, { id: "s2", directory: "/proj", parent_id: "s1" }],
+    messagesV2: [
+      { id: "u1", session_id: "s1", type: "user", time_updated: 90, data: { tokens: ocData2().tokens } },
+      { id: "a1", session_id: "s1", time_updated: 100, data: ocData2() },
+      { id: "c1", session_id: "s1", type: "compaction", time_updated: 101, data: { tokens: ocData2().tokens } },
+      { id: "y1", session_id: "s1", type: "system", time_updated: 102, data: { text: "x" } },
+      {
+        id: "a2", session_id: "s2", time_updated: 110,
+        data: ocData2({ model: { providerID: "anthropic", id: "claude-opus-5" } }),
+      },
+    ],
+  });
+  const store = ocStore();
+  const events = await oc2Run(path, store);
+  assert.deepEqual(
+    events.map((e) => [e.message_id, e.provider, e.model, e.is_sidechain, e.git_branch]),
+    [["a1", "openai", "gpt-6.2-sol", false, null], ["a2", "anthropic", "claude-opus-5", true, null]],
+  );
+  const e = events[0];
+  assert.deepEqual(
+    [e.input_tokens, e.output_tokens, e.reasoning_tokens, e.cache_read_tokens, e.cache_write_5m_tokens, e.project],
+    [100, 10, 5, 1000, 50, "/proj"],
+  );
+  assert.equal(e.ts, 1795000003000);
+  assert.equal(Number(store.getKV("watermark:opencode-v2:time_updated")), 110);
+  // The next run re-reads the boundary only, as for 1.x.
+  assert.deepEqual((await oc2Run(path, store)).map((x) => x.message_id), ["a2"]);
+});
+
+test("OC2: a converted database yields each converted message once, from 1.x, compaction included", async () => {
+  // Converted rows keep id, session id and time_updated, but 2.4.2 moves
+  // time.completed by 1 ms and stores compaction calls without tokens.
+  const path = oc2Path({
+    v2: true,
+    sessions: [{ id: "s1", directory: "/proj" }],
+    sessionsV2: [{ id: "s1", directory: "/proj" }, { id: "s9", directory: "/proj" }],
+    messages: [
+      { id: "m1", session_id: "s1", time_updated: 100, data: ocData1() },
+      { id: "m2", session_id: "s1", time_updated: 120, data: ocData1({ agent: "compaction", mode: "compaction" }) },
+    ],
+    messagesV2: [
+      {
+        id: "m1", session_id: "s1", time_updated: 100,
+        data: ocData2({ time: { created: 1795000000000, completed: 1795000003001 } }),
+      },
+      {
+        id: "m2", session_id: "s1", type: "compaction", time_updated: 120,
+        data: { status: "completed", reason: "auto" },
+      },
+      { id: "x1", session_id: "s1", type: "system", time_updated: 121, data: { text: "tools changed" } },
+      { id: "n1", session_id: "s9", time_updated: 200, data: ocData2() },
+    ],
+  });
+  const store = ocStore();
+  const events = await oc2Run(path, store);
+  assert.deepEqual(events.map((e) => e.message_id).sort(), ["m1", "m2", "n1"]);
+  assert.equal(events.find((e) => e.message_id === "m1").ts, 1795000003000); // 1.x's, not 2.x's
+  assert.equal(events.find((e) => e.message_id === "m2").agent, "compaction");
+  assert.equal(Number(store.getKV("watermark:opencode:time_updated")), 120);
+  assert.equal(Number(store.getKV("watermark:opencode-v2:time_updated")), 200);
+});
+
+test("OC2: a message converted after the 2.x watermark moved on is not yielded again", async () => {
+  const path = oc2Path({
+    v2: true,
+    sessions: [{ id: "s1", directory: "/proj" }],
+    sessionsV2: [{ id: "s9", directory: "/proj" }],
+    messages: [
+      { id: "old", session_id: "s1", time_updated: 50, data: ocData1() },
+      { id: "m1", session_id: "s1", time_updated: 100, data: ocData1() },
+    ],
+    messagesV2: [{ id: "n1", session_id: "s9", time_updated: 200, data: ocData2() }],
+  });
+  const store = ocStore();
+  assert.deepEqual((await oc2Run(path, store)).map((e) => e.message_id).sort(), ["m1", "n1", "old"]);
+
+  // The background conversion now writes the old messages, below both watermarks.
+  const db = new DatabaseSync(path);
+  db.exec("INSERT INTO session_v2 (id, directory) VALUES ('s1', '/proj')");
+  for (const [id, t] of [["old", 50], ["m1", 100]]) {
+    db.prepare("INSERT INTO session_message VALUES (?, 's1', 'assistant', ?, 0, ?, ?)")
+      .run(id, t, t, JSON.stringify(ocData2()));
+  }
+  db.close();
+  // Only the two boundary rows, one per part, as before the conversion.
+  assert.deepEqual((await oc2Run(path, store)).map((e) => e.message_id).sort(), ["m1", "n1"]);
+  // A backfill still yields every message once.
+  assert.deepEqual((await oc2Run(path, store, true)).map((e) => e.message_id).sort(), ["m1", "n1", "old"]);
+});
+
+test("OC2: a database with neither 1.x nor 2.x tables yields nothing and does not throw", async () => {
+  const path = join(mkTmp(), "opencode.db");
+  const db = new DatabaseSync(path);
+  db.exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)");
+  db.close();
+  assert.deepEqual(await oc2Run(path), []);
+});
+
+test("OC2: readHomeDatabase reads a 2.x-only home and drops malformed rows", () => {
+  const path = oc2Path({
+    v1: false,
+    v2: true,
+    sessionsV2: [{ id: "s1", directory: "/work" }],
+    messagesV2: [
+      { id: "a1", session_id: "s1", time_updated: 100, data: ocData2() },
+      { id: "a2", session_id: "s1", time_updated: 101, data: "not json" },
+      { id: "a3", session_id: "s1", time_updated: 102, data: ocData2({ model: "openai/gpt-6.2-sol" }) },
+    ],
+  });
+  const db = new DatabaseSync(path);
+  // A blob id is not text; a time_updated beyond 2^53 cannot be read into JavaScript.
+  db.prepare("INSERT INTO session_message VALUES (x'00', 's1', 'assistant', 10, 0, 103, ?)")
+    .run(JSON.stringify(ocData2()));
+  db.prepare("INSERT INTO session_message VALUES ('a5', 's1', 'assistant', 11, 0, ?, ?)")
+    .run(2n ** 60n, JSON.stringify(ocData2()));
+  db.close();
+  const read = readHomeDatabase(path);
+  // a3 has no model id to read: provider and model are null, which wellFormed allows.
+  assert.deepEqual(read.events.map((e) => [e.message_id, e.model]), [["a1", "gpt-6.2-sol"], ["a3", null]]);
+  // The rows the guard drops are never read, so they do not move the watermark (as for 1.x).
+  assert.deepEqual(read.watermarks, { v1: null, v2: 102 });
+});
+
+test("OC2: readHomeDatabase rejects session_v2 as a view, and a database with neither part", () => {
+  const path = oc2Path({ v1: false, v2: true });
+  const db = new DatabaseSync(path);
+  db.exec("ALTER TABLE session_v2 RENAME TO s2; CREATE VIEW session_v2 AS SELECT * FROM s2;");
+  db.close();
+  assert.throws(() => readHomeDatabase(path), /not an OpenCode database/);
+});
+
+test("OC2: an extra home holding a 2.x-only database is extracted with its own watermark", async () => {
+  const home = mkTmp();
+  mkdirSync(join(home, ".local", "share", "opencode"), { recursive: true });
+  const path = openCodeDb(join(home, ".local", "share", "opencode", "opencode.db"), {
+    v1: false,
+    v2: true,
+    sessionsV2: [{ id: "s1", directory: "/work" }],
+    messagesV2: [{ id: "a1", session_id: "s1", time_updated: 100, data: ocData2() }],
+  });
+  const store = ocStore();
+  const config = { sources: { opencode: { db: join(mkTmp(), "none.db") } }, homes: [{ home, project: "/p/x" }] };
+  const events = await collect(_oc({ store, config, full: false }));
+  assert.deepEqual(events.map((e) => [e.message_id, e.project]), [["a1", "/p/x"]]);
+  assert.equal(Number(store.getKV(`watermark:opencode-v2:time_updated:${path}`)), 100);
+});
+
+test("OC2: reconcile checks 1.x on session and 2.x only on the sessions OpenCode 2 created", () => {
+  const path = oc2Path({
+    v2: true,
+    // s1 is converted: its 2.x compaction row has no tokens, so only 1.x can sum to the rollup.
+    sessions: [{ id: "s1", ...ROLL2 }],
+    sessionsV2: [{ id: "s1", ...ROLL2 }, { id: "n1", ...ROLL }, { id: "n2", ...ROLL }],
+    messages: [
+      { id: "m1", session_id: "s1", data: ocData1() },
+      { id: "m2", session_id: "s1", data: ocData1({ agent: "compaction" }) },
+    ],
+    messagesV2: [
+      { id: "m1", session_id: "s1", data: ocData2() },
+      { id: "m2", session_id: "s1", type: "compaction", data: { status: "completed" } },
+      { id: "a1", session_id: "n1", data: ocData2() },
+      {
+        id: "a2", session_id: "n2",
+        data: ocData2({ tokens: { input: 1, output: 10, reasoning: 5, cache: { read: 1000, write: 50 } } }),
+      },
+    ],
+  });
+  const r = _rec(path);
+  assert.deepEqual([r.v1.ok, r.v1.total], [1, 1]);
+  assert.deepEqual([r.v2.ok, r.v2.total], [1, 2]);
+  assert.equal(r.v2.mismatches[0].session, "n2");
+
+  assert.equal(_rec(oc2Path({ sessions: [{ id: "s1" }] })).v2, null);
+  assert.equal(_rec(oc2Path({ v1: false, v2: true })).v1, null);
+});
+
+test("OC2: listModels reads the model of both parts", () => {
+  const path = oc2Path({
+    v2: true,
+    sessions: [{ id: "s1" }],
+    sessionsV2: [{ id: "n1" }],
+    messages: [{ id: "m1", session_id: "s1", data: ocData1({ modelID: "gpt-6.1-sol" }) }],
+    messagesV2: [
+      { id: "a1", session_id: "n1", data: ocData2({ model: { providerID: "anthropic", id: "claude-opus-5" } }) },
+      { id: "u1", session_id: "n1", type: "user", data: { model: { providerID: "x", id: "not-a-call" } } },
+    ],
+  });
+  assert.deepEqual(listModels(path).sort(), [["anthropic", "claude-opus-5"], ["openai", "gpt-6.1-sol"]]);
 });
 
 // --- project = repository root (plans/008) ---------------------------------

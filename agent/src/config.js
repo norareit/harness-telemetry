@@ -38,6 +38,9 @@ const DEFAULTS = {
   },
   pricing: {
     modelsJson: "~/.cache/opencode/models.json",
+    // OpenCode 2 keeps its catalogue in its database (plans/025); the fresher of
+    // the two is used. null = models.json only.
+    catalogDb: "~/.local/share/opencode/opencode.db",
     overrides: null, // defaults to bundled pricing-overrides.json
   },
   // Extra homes (plans/018): directories laid out like a user's home whose

@@ -22,6 +22,12 @@ independent — the archive is written even with no network, and a backlog drain
 The two harness paths are those of the user who runs the agent. The same two are read under every directory listed in
 `homes` ([extra homes](#extra-homes)), for harnesses that run with another home, such as one in a container.
 
+OpenCode 1 and OpenCode 2 use the same database path with different tables, and the agent reads both (plan 025): the
+1.x tables, the 2.x tables, or both in a 1.x database that OpenCode 2 has converted, without counting a converted
+message twice. OpenCode 2 no longer writes `models.json`: it keeps the price catalogue in its database, and the agent
+uses whichever of the two is fresher. OpenCode 2 also keeps its logins in that database, so a copy of an OpenCode 2
+home holds credentials: keep such a copy private.
+
 ## Layout
 
 | Path | What |
@@ -357,18 +363,21 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
 * **claude-code transcripts** — the source path resolves; file count
 * **claude-code dedupe regression** — deduped vs naive output / cache-creation totals; the naive sum must stay ≥1.5× the
   deduped one (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0), and 0 usage conflicts within a `requestId`
-* **opencode db / opencode reconciliation** — the DB opens; per-message token sums match the `session` rollup columns
+* **opencode db / opencode reconciliation** — the DB opens, with its 1.x and 2.x row counts and, after OpenCode 2 has
+  converted it, the conversion phase; per-message token sums match the rollup columns: `session` for 1.x, and
+  `session_v2` for the sessions OpenCode 2 created (a converted session is checked on 1.x, which alone still holds its
+  compaction calls' tokens)
 * **extra homes** — each directory the `homes` entries resolve to, with its project, transcript count and OpenCode
   event count. Fails when an entry without `*` does not exist, when a transcript or database is there and cannot
   be read the way the extractor reads it, or when one was skipped because it is not a file inside its home (the
   file is named). Absent without `homes`. The checks above and "models priced" keep reading the device's own home only.
-* **price table** — loads, model count
+* **price table** — loads, model count, and which source won (`models.json` or OpenCode 2's catalogue)
 * **reasoning tokens billed** — 1M reasoning tokens cost the full output rate (the permanent guard against the
   reasoning-exclusion regression)
 * **scenarios resolve** — every configured counterfactual target has a rate card
 * **cost reproducible from stored rates** — recomputes `cost_usd` from the stored token counts and applied rates; drift
   is a corrupted write
-* **price table freshness** — `models.json` newer than 14 days (stale = permanent mis-valuation under the freeze)
+* **price table freshness** — the table in use is newer than 14 days (stale = permanent mis-valuation under the freeze)
 * **override drift** — each pin vs the live table, reporting pins the table can no longer confirm rather than passing
   them silently
 * **no unpriced billable events** — every non-local event carries a rate card
@@ -389,8 +398,12 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
 
 ## Pricing
 
-Rates come from `~/.cache/opencode/models.json` (covers both harnesses, but only refreshed while OpenCode runs — see
-[The price table depends on OpenCode](#the-price-table-depends-on-opencode)). `agent/pricing-overrides.json`
+Rates come from OpenCode's copy of the models.dev catalogue (covers both harnesses, but only refreshed while OpenCode
+runs — see [The price table depends on OpenCode](#the-price-table-depends-on-opencode)): `~/.cache/opencode/models.json`
+from OpenCode 1, or the `kv` row `models-dev:v3:catalog` in OpenCode 2's `opencode.db` (`pricing.catalogDb`), whichever
+is fresher. The catalogue's costs are in a newer schema; `fromCatalogCost` converts them to `models.json`'s shape,
+keeping the text rates and context tiers and ignoring what `models.json` never had (service-tier, region and
+time-of-day multipliers, image, audio and video prices). `agent/pricing-overrides.json`
 does two jobs: it fills table misses (a model the table does not carry, or carries only under another provider), and it
 pins a rate you want to use in place of the table's. Note it is **not** what protects historical rows from a table
 update — the plan-004 freeze does that, by valuing each row once at ingest. That makes a pin pure forward policy: it
@@ -464,7 +477,8 @@ Because frozen costs do not self-heal, `doctor` now watches the two things that 
 
 ### The price table depends on OpenCode
 
-The agent only **reads** `models.json`; OpenCode writes it, and only while OpenCode is running. Nothing in this repo
+The agent only **reads** the price table; OpenCode writes it (`models.json` under OpenCode 1, its catalogue row under
+OpenCode 2), and only while OpenCode is running. Nothing in this repo
 refreshes it. On a machine where you mostly use Claude Code, the table stays at whatever OpenCode last fetched, even
 though it prices Claude Code events too.
 
@@ -474,8 +488,9 @@ up. Real case: Opus 5.5 was used in Claude Code from 2026-09-23, but OpenCode ha
 OpenCode on 2026-09-25 refreshed the table, so events from then on priced normally, but the 92 events before it stayed
 at `$0` until an explicit `reprice` five days later.
 
-Each machine has its own `models.json`, so each can be stale independently. `doctor` flags both symptoms — a table older
-than 14 days, and unpriced billable events — but only when it is run. Recovery:
+Each machine has its own price table, so each can be stale independently. On a machine that has moved to OpenCode 2,
+`models.json` stays on disk and stops being updated; the catalogue is newer, so it wins. `doctor` flags both symptoms
+— a table older than 14 days, and unpriced billable events — but only when it is run. Recovery:
 
 1. Open OpenCode once on that machine to refresh the table. Add the model to `pricing-overrides.json` only if the
    refreshed table still does not carry it: an override that merely duplicates the table can only drift from it.

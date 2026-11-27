@@ -36,6 +36,7 @@ export async function runSync({ full = false, noShip = false } = {}) {
   const config = await loadConfig();
   const pricing = await loadPricing({
     modelsJsonPath: config.pricing.modelsJson,
+    catalogDbPath: config.pricing.catalogDb,
     overridesPath: config.pricing.overrides,
   });
   const store = new LocalStore();
