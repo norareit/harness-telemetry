@@ -44,6 +44,7 @@ import { DatabaseSync } from "node:sqlite";
 import { expandHome } from "../config.js";
 import { databaseInHome, inputsFor, wellFormed } from "../homes.js";
 import { projectRootOf } from "../project.js";
+import { eventKey } from "../record.js";
 
 const HARNESS = "opencode";
 // The 1.x keys are the original ones, so nothing is re-read after an upgrade.
@@ -164,6 +165,7 @@ async function* extractDatabase({ store, config, full, input }) {
     // plans/008: same repository-root rule as Claude Code, applied here where
     // `config` is available. See extractClaudeCode for why not inside toEvent.
     const detectRoot = config.project?.detectRoot !== false;
+    const branchless = isBranchless(schema);
     for (const part of partsOf(schema)) {
       const since = full ? 0 : Number(store.getKV(WATERMARK_KEY[part]) || 0);
       let maxWatermark = since;
@@ -171,6 +173,7 @@ async function* extractDatabase({ store, config, full, input }) {
         maxWatermark = Math.max(maxWatermark, row.time_updated);
         const ev = toEvent(row, part);
         if (ev) {
+          if (branchless) keepStoredBranch(store, ev);
           if (detectRoot) ev.project = projectRootOf(ev.project);
           yield ev;
         }
@@ -204,6 +207,7 @@ async function* extractHomeDatabase({ store, full, input }) {
   }
   for (const ev of read.events) {
     ev.project = input.project;
+    if (read.branchless) keepStoredBranch(store, ev);
     yield ev;
   }
   for (const part of ["v1", "v2"]) {
@@ -222,7 +226,10 @@ async function* extractHomeDatabase({ store, full, input }) {
  * checked `databaseInHome` first.
  *
  * @param {{v1?: number, v2?: number}} since
- * @returns {{events: object[], watermarks: {v1: number|null, v2: number|null}}}
+ * `branchless`: the database has a 1.x part but no `workspace.branch` any more
+ * (OpenCode 2 replaced it), so the extractor keeps stored branches.
+ *
+ * @returns {{events: object[], watermarks: {v1: number|null, v2: number|null}, branchless: boolean}}
  */
 export function readHomeDatabase(dbPath, since = {}) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -240,10 +247,25 @@ export function readHomeDatabase(dbPath, since = {}) {
       }
       watermarks[part] = max;
     }
-    return { events, watermarks };
+    return { events, watermarks, branchless: isBranchless(schema) };
   } finally {
     db.close();
   }
+}
+
+// Review finding R2. Once OpenCode 2 has replaced `workspace`, the 1.x part can
+// no longer report a branch. A branch it no longer reports did not go away:
+// re-reading the boundary row, or a backfill, would otherwise null a stored
+// branch and re-record the event as changed. A database that still has the
+// column reports its own value, NULL included, as before.
+function isBranchless(schema) {
+  return schema.v1 && !schema.branch;
+}
+
+function keepStoredBranch(store, ev) {
+  if (ev.git_branch != null) return;
+  const stored = store.storedEvent(eventKey(ev));
+  if (stored?.git_branch) ev.git_branch = stored.git_branch;
 }
 
 // Never throws: a row it cannot make an event of is null, like a row it would
@@ -341,9 +363,11 @@ export function listModels(dbPath) {
 
 /**
  * Read-only helper for `doctor`: per-session sums vs the session rollup
- * columns, per part. 1.x is checked over `session`. 2.x only over the sessions
- * OpenCode 2 created (not in `session`): a converted session's 2.x rows lack
- * its compaction calls' tokens, while its rollups equal 1.x's.
+ * columns, per part. 1.x is checked over `session`. 2.x over every
+ * `session_v2` session, summing what extraction reads for it (review finding
+ * R3): its 1.x assistant messages, which alone still hold a converted session's
+ * compaction tokens, plus its 2.x assistant rows whose id is not in `message`.
+ * So a converted session that resumed under OpenCode 2 is checked too.
  *
  * @returns {{v1: object|null, v2: object|null}} each {total, ok, mismatches},
  *   null for a part the database does not have.
@@ -353,16 +377,16 @@ export function reconcile(dbPath) {
   try {
     const schema = schemaOf(db);
     return {
-      v1: schema.v1
-        ? reconcilePart(db, "SELECT * FROM session", "SELECT data FROM message WHERE session_id = ?", "v1")
-        : null,
+      v1: schema.v1 ? reconcilePart(db, "SELECT * FROM session", [V1_MESSAGES]) : null,
       v2: schema.v2
-        ? reconcilePart(
-            db,
-            `SELECT * FROM session_v2 ${schema.v1 ? "WHERE id NOT IN (SELECT id FROM session)" : ""}`,
-            "SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant'",
-            "v2",
-          )
+        ? reconcilePart(db, "SELECT * FROM session_v2", [
+            ...(schema.v1 ? [V1_MESSAGES] : []),
+            {
+              part: "v2",
+              sql: `SELECT data FROM session_message m WHERE session_id = ? AND type = 'assistant'
+                    ${schema.v1 ? "AND NOT EXISTS (SELECT 1 FROM message o WHERE o.id = m.id)" : ""}`,
+            },
+          ])
         : null,
     };
   } finally {
@@ -370,22 +394,26 @@ export function reconcile(dbPath) {
   }
 }
 
-function reconcilePart(db, sessionsSql, messagesSql, part) {
+const V1_MESSAGES = { part: "v1", sql: "SELECT data FROM message WHERE session_id = ?" };
+
+function reconcilePart(db, sessionsSql, sources) {
   const sessions = db.prepare(sessionsSql).all();
-  const messages = db.prepare(messagesSql);
+  const queries = sources.map(({ part, sql }) => ({ part, stmt: db.prepare(sql) }));
   let ok = 0;
   const mismatches = [];
   for (const s of sessions) {
-    const msgs = messages
-      .all(s.id)
-      .map((r) => {
-        try {
-          return JSON.parse(r.data);
-        } catch {
-          return null;
-        }
-      })
-      .filter((d) => d && d.tokens && (part === "v2" || d.role === "assistant"));
+    const msgs = queries.flatMap(({ part, stmt }) =>
+      stmt
+        .all(s.id)
+        .map((r) => {
+          try {
+            return JSON.parse(r.data);
+          } catch {
+            return null;
+          }
+        })
+        .filter((d) => d && d.tokens && (part === "v2" || d.role === "assistant")),
+    );
 
     const sum = (f) => msgs.reduce((a, d) => a + (f(d.tokens) || 0), 0);
     const got = {

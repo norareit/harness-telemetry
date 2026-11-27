@@ -476,13 +476,13 @@ test("check 'opencode db': a 2.x-only database passes; one with neither part fai
   assert.match(bad.detail, /not an OpenCode database/);
 });
 
-test("check 'opencode reconciliation': converted sessions on 1.x, new ones on 2.x", (t) => {
+test("check 'opencode reconciliation': 1.x on session, every 2.x session on 1.x plus 2.x-only messages", (t) => {
   const spec = (n2Input) => ({
     v2: true,
     sessions: [{ id: "s1", ...ROLL }],
     sessionsV2: [{ id: "s1", ...ROLL }, { id: "n1", ...ROLL, tokens_input: n2Input }],
     messages: [{ id: "m1", session_id: "s1", data: ocData1() }],
-    // The converted session's 2.x copy has lost its tokens (a compaction row): not reconciled on 2.x.
+    // The converted session's 2.x copy has lost its tokens (a compaction row): its 1.x messages count instead.
     messagesV2: [
       { id: "m1", session_id: "s1", type: "compaction", data: { status: "completed" } },
       { id: "a1", session_id: "n1", data: ocData2() },
@@ -493,11 +493,11 @@ test("check 'opencode reconciliation': converted sessions on 1.x, new ones on 2.
   assert.equal(
     good.detail,
     "1.x: 1/1 sessions reconcile per-message sums vs rollup columns; " +
-      "2.x: 1/1 sessions created by OpenCode 2 reconcile",
+      "2.x: 2/2 sessions reconcile (1.x messages plus 2.x-only messages vs session_v2 rollups)",
   );
   const bad = check("opencode reconciliation")(ocCtx(ocDoctorDb(t, spec(101))));
   assert.equal(bad.ok, false);
-  assert.match(bad.detail, /2\.x: 0\/1 sessions created by OpenCode 2 reconcile — first mismatch: .*"n1"/);
+  assert.match(bad.detail, /2\.x: 1\/2 sessions reconcile .* — first mismatch: .*"n1"/);
 });
 
 test("check 'extra homes': a home with a 2.x-only database is read", async (t) => {
@@ -525,4 +525,15 @@ test("check 'price table freshness': dated from the source that won, catalogue o
   const none = check("price table freshness")({ pricing: { meta: { updatedAt: null, modelsPath: "/m/models.json" } } });
   assert.equal(none.ok, false);
   assert.match(none.detail, /no price table loaded/);
+});
+
+test("check 'price table' (R1): names a catalogue that was ignored, and still passes on models.json", () => {
+  const pricing = (meta) => new Pricing(table({ "openai/gpt-6.2-sol": { input: 2, output: 10 } }), {}, meta);
+  const plain = check("price table")({ pricing: pricing({ modelsPath: "/m/models.json", tableError: null }) });
+  assert.deepEqual(plain, { ok: true, detail: "1 models from /m/models.json" });
+  const ignored = check("price table")({
+    pricing: pricing({ modelsPath: "/m/models.json", tableError: null, catalogIgnored: "/db: no priced model" }),
+  });
+  assert.equal(ignored.ok, true);
+  assert.equal(ignored.detail, "1 models from /m/models.json; catalogue ignored: /db: no priced model");
 });

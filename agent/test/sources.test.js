@@ -14,7 +14,7 @@ import {
   extractOpenCode as _oc, reconcile as _rec, readHomeDatabase, listModels,
 } from "../src/sources/opencode.js";
 import { projectRootOf } from "../src/project.js";
-import { openCodeDb, ocData1, ocData2 } from "./helpers.js";
+import { openCodeDb, ocData1, ocData2, event } from "./helpers.js";
 
 // Every tmp dir this file makes is tracked and removed after the run — these
 // helpers are not handed a test context, so a single top-level after() is the
@@ -454,7 +454,7 @@ test("OC2: an extra home holding a 2.x-only database is extracted with its own w
   assert.equal(Number(store.getKV(`watermark:opencode-v2:time_updated:${path}`)), 100);
 });
 
-test("OC2: reconcile checks 1.x on session and 2.x only on the sessions OpenCode 2 created", () => {
+test("OC2: reconcile checks 1.x on session, and every 2.x session on 1.x plus 2.x-only messages", () => {
   const path = oc2Path({
     v2: true,
     // s1 is converted: its 2.x compaction row has no tokens, so only 1.x can sum to the rollup.
@@ -476,8 +476,9 @@ test("OC2: reconcile checks 1.x on session and 2.x only on the sessions OpenCode
   });
   const r = _rec(path);
   assert.deepEqual([r.v1.ok, r.v1.total], [1, 1]);
-  assert.deepEqual([r.v2.ok, r.v2.total], [1, 2]);
-  assert.equal(r.v2.mismatches[0].session, "n2");
+  // s1 reconciles on its 1.x messages (the 2.x compaction row has no tokens); n2 falls short.
+  assert.deepEqual([r.v2.ok, r.v2.total], [2, 3]);
+  assert.deepEqual(r.v2.mismatches.map((m) => m.session), ["n2"]);
 
   assert.equal(_rec(oc2Path({ sessions: [{ id: "s1" }] })).v2, null);
   assert.equal(_rec(oc2Path({ v1: false, v2: true })).v1, null);
@@ -831,4 +832,88 @@ test("OC: a home's database whose message is a view is skipped, the others are r
   db.close();
   const events = await collect(_oc({ store: ocStore(), config: f.config, full: true }));
   assert.deepEqual(events.map((e) => e.message_id), ["own-old", "own-new"]);
+});
+
+// Review finding R3: a converted session that resumes in OpenCode 2 gets new
+// 2.x messages, and its session_v2 rollups grow past the 1.x ones.
+test("OC2 (R3): a resumed converted session is reconciled on 1.x plus its new 2.x messages", () => {
+  const resumed = (newTokens) =>
+    oc2Path({
+      v2: true,
+      sessions: [{ id: "s1", ...ROLL }],
+      sessionsV2: [{ id: "s1", ...ROLL2 }],
+      messages: [{ id: "m1", session_id: "s1", data: ocData1() }],
+      messagesV2: [
+        { id: "m1", session_id: "s1", data: ocData2({ time: { created: 1, completed: 2 } }) },
+        ...(newTokens ? [{ id: "r1", session_id: "s1", data: ocData2({ tokens: newTokens }) }] : []),
+      ],
+    });
+  const full = ocData2().tokens;
+  const ok = _rec(resumed(full));
+  assert.deepEqual([ok.v1.ok, ok.v1.total, ok.v2.ok, ok.v2.total], [1, 1, 1, 1]);
+  // New usage that falls short of the 2.x rollup is caught.
+  const short = _rec(resumed({ ...full, output: 9 }));
+  assert.deepEqual([short.v2.ok, short.v2.total], [0, 1]);
+  assert.equal(short.v2.mismatches[0].got.output, 19);
+  assert.equal(short.v2.mismatches[0].want.output, 20);
+  // So is a rollup that grew with no new message to account for it.
+  assert.deepEqual([_rec(resumed(null)).v2.ok], [0]);
+});
+
+// Review finding R2: once OpenCode 2 replaces `workspace`, the 1.x part can no
+// longer report a branch; a branch already stored must survive a re-read.
+const BRANCHED = { harness: "opencode", session_id: "s1", message_id: "m1", git_branch: "topic", project: "/proj" };
+
+function convertedWithStoredBranch() {
+  const path = oc2Path({
+    v2: true,
+    sessions: [{ id: "s1", directory: "/proj" }],
+    sessionsV2: [{ id: "s1", directory: "/proj" }],
+    messages: [
+      { id: "m1", session_id: "s1", time_updated: 100, data: ocData1() },
+      { id: "m2", session_id: "s1", time_updated: 100, data: ocData1() },
+    ],
+    messagesV2: [{ id: "m1", session_id: "s1", time_updated: 100, data: ocData2() }],
+  });
+  const store = ocStore();
+  store.record(event(BRANCHED));
+  return { path, store };
+}
+
+test("OC2 (R2): a converted database keeps the stored branch on the boundary re-read and on backfill", async () => {
+  const { path, store } = convertedWithStoredBranch();
+  for (const full of [false, true]) {
+    const events = await oc2Run(path, store, full);
+    const byId = Object.fromEntries(events.map((e) => [e.message_id, e.git_branch]));
+    // m1 had a branch: it keeps it. m2 was never stored with one: it stays null.
+    assert.deepEqual(byId, { m1: "topic", m2: null }, `full=${full}`);
+  }
+});
+
+test("OC2 (R2): a database that still has workspace.branch reports its own value, NULL included", async () => {
+  const path = oc2Path({
+    sessions: [{ id: "s1", directory: "/proj" }],
+    messages: [{ id: "m1", session_id: "s1", time_updated: 100, data: ocData1() }],
+  });
+  const store = ocStore();
+  store.record(event(BRANCHED));
+  const events = await oc2Run(path, store, true);
+  assert.equal(events[0].git_branch, null);
+});
+
+test("OC2 (R2): a converted home database keeps the stored branch too", async () => {
+  const home = mkTmp();
+  mkdirSync(join(home, ".local", "share", "opencode"), { recursive: true });
+  openCodeDb(join(home, ".local", "share", "opencode", "opencode.db"), {
+    v2: true,
+    sessions: [{ id: "s1", directory: "/work" }],
+    sessionsV2: [{ id: "s1", directory: "/work" }],
+    messages: [{ id: "m1", session_id: "s1", time_updated: 100, data: ocData1() }],
+  });
+  const store = ocStore();
+  store.record(event({ ...BRANCHED, project: "/p/x" }));
+  const config = { sources: { opencode: { db: join(mkTmp(), "none.db") } }, homes: [{ home, project: "/p/x" }] };
+  const events = await collect(_oc({ store, config, full: true }));
+  assert.deepEqual(events.map((e) => [e.message_id, e.git_branch]), [["m1", "topic"]]);
+  assert.equal(readHomeDatabase(join(home, ".local", "share", "opencode", "opencode.db")).branchless, true);
 });

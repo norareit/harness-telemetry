@@ -209,9 +209,10 @@ function checkOpenCodeDb(ctx) {
   }
 }
 
-// plans/025: 1.x over `session`, 2.x over the sessions OpenCode 2 created. A
-// converted session is reconciled on 1.x alone — its 2.x copy lacks the tokens
-// of its compaction calls, while its rollups are the same in both tables.
+// plans/025: 1.x over `session`; 2.x over every `session_v2` session, on what
+// extraction reads for it — its 1.x messages (a converted session's 2.x copy
+// lacks its compaction calls' tokens) plus its 2.x-only messages, so a session
+// that resumed under OpenCode 2 is checked too (review finding R3).
 function checkOpenCodeReconciliation(ctx) {
   if (!ctx.ocEnabled || !existsSync(ctx.ocDb)) return null;
   const rec = reconcile(ctx.ocDb);
@@ -220,7 +221,7 @@ function checkOpenCodeReconciliation(ctx) {
   let firstMismatch = null;
   for (const [part, label] of [
     ["v1", "1.x: %s sessions reconcile per-message sums vs rollup columns"],
-    ["v2", "2.x: %s sessions created by OpenCode 2 reconcile"],
+    ["v2", "2.x: %s sessions reconcile (1.x messages plus 2.x-only messages vs session_v2 rollups)"],
   ]) {
     const r = rec[part];
     if (!r) continue;
@@ -236,11 +237,17 @@ function checkOpenCodeReconciliation(ctx) {
 }
 
 function checkPriceTable(ctx) {
+  // An unusable OpenCode 2 catalogue does not fail this check while models.json
+  // loads, but it is named: on a device that moved, models.json is ageing, and
+  // "price table freshness" alone would not say why (plans/025, R1).
+  const { tableError, modelsPath, catalogIgnored } = ctx.pricing.meta;
   return {
-    ok: !ctx.pricing.meta.tableError,
-    detail: ctx.pricing.meta.tableError
-      ? `failed to load ${ctx.pricing.meta.modelsPath}: ${ctx.pricing.meta.tableError.message}`
-      : `${countModels(ctx.pricing.table)} models from ${ctx.pricing.meta.modelsPath}`,
+    ok: !tableError,
+    detail:
+      (tableError
+        ? `failed to load ${modelsPath}: ${tableError.message}`
+        : `${countModels(ctx.pricing.table)} models from ${modelsPath}`) +
+      (catalogIgnored ? `; catalogue ignored: ${catalogIgnored}` : ""),
   };
 }
 

@@ -430,3 +430,60 @@ test("loadPricing: without catalogDbPath only models.json is read, dated by its 
   assert.equal(p.meta.source, "models.json");
   assert.ok(Math.abs(Date.now() - p.meta.updatedAt - 3 * 86_400_000) < 60_000);
 });
+
+// Review finding R1: an unusable catalogue must not displace a working models.json.
+const catalogRow = (value, kvTimeUpdated = Date.now()) => (path) =>
+  openCodeDb(path, { v1: false, v2: true, kv: { "models-dev:v3:catalog": value }, kvTimeUpdated });
+const UNUSABLE = {
+  "an empty body": [catalogRow({ updatedAt: Date.now(), digest: "d", body: "{}" }), /no priced model/],
+  "a body whose models have no usable cost": [
+    catalogRow({
+      updatedAt: Date.now(),
+      body: JSON.stringify({ openai: { models: { "gpt-6.2-sol": { cost: { text: { input: { price: 2 } } } } } } }),
+    }),
+    /no priced model/,
+  ],
+  "no updatedAt of its own, however new the row is": [
+    catalogRow({ digest: "d", body: catalogValue(0, { "openai/gpt-6.2-sol": { text: { input: { price: 3 },
+      output: { price: 10 } } } }).body }),
+    /updatedAt/,
+  ],
+  "an updatedAt that is not a positive number": [
+    catalogRow({ ...catalogValue(0, { "openai/gpt-6.2-sol": { text: { input: { price: 3 }, output: { price: 10 } } } }),
+      updatedAt: "2026-11-27" }),
+    /updatedAt/,
+  ],
+  "a body that does not parse": [catalogRow({ updatedAt: Date.now(), body: "{not json" }), /parse|JSON/],
+};
+
+for (const [name, [make, reason]] of Object.entries(UNUSABLE)) {
+  test(`loadPricing (R1): a catalogue with ${name} is ignored and says why`, async (t) => {
+    const s = pricingSources(t, { modelsAgeDays: 5, catalog: make });
+    const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+    assert.equal(p.meta.source, "models.json");
+    assert.equal(p.meta.tableError, null);
+    assert.equal(p.price(event({ provider: "openai", model: "gpt-6.2-sol", input_tokens: 10 })).priced_by, "table");
+    assert.match(p.meta.catalogIgnored, reason);
+  });
+}
+
+test("loadPricing (R1): an absent catalogue is not reported as ignored", async (t) => {
+  const absent = [
+    () => {}, // no file
+    (path) => openCodeDb(path, {}), // 1.19.6: no kv table
+    (path) => openCodeDb(path, { v1: false, v2: true, kv: { "migration.v1-v2": { phase: "completed" } } }), // no row
+  ];
+  for (const make of absent) {
+    const s = pricingSources(t, { catalog: make });
+    const p = await loadPricing({ modelsJsonPath: s.modelsJson, catalogDbPath: s.catalogDb });
+    assert.equal(p.meta.source, "models.json");
+    assert.equal(p.meta.catalogIgnored ?? null, null);
+  }
+});
+
+test("loadPricing (R1): with no models.json, an unusable catalogue leaves the table failed to load", async (t) => {
+  const s = pricingSources(t, { catalog: UNUSABLE["an empty body"][0] });
+  const p = await loadPricing({ modelsJsonPath: join(s.catalogDb, "..", "missing.json"), catalogDbPath: s.catalogDb });
+  assert.ok(p.meta.tableError);
+  assert.equal(p.meta.source, null);
+});

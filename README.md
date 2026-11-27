@@ -365,13 +365,14 @@ the code right" before it lands. Each check is a named entry in the `doctor.js` 
   deduped one (it runs ~2.2–2.3×; a dedupe bug collapses it to ~1.0), and 0 usage conflicts within a `requestId`
 * **opencode db / opencode reconciliation** — the DB opens, with its 1.x and 2.x row counts and, after OpenCode 2 has
   converted it, the conversion phase; per-message token sums match the rollup columns: `session` for 1.x, and
-  `session_v2` for the sessions OpenCode 2 created (a converted session is checked on 1.x, which alone still holds its
-  compaction calls' tokens)
+  `session_v2` for every 2.x session, summing its 1.x messages (which alone still hold a converted session's compaction
+  calls' tokens) and its messages that exist only in 2.x
 * **extra homes** — each directory the `homes` entries resolve to, with its project, transcript count and OpenCode
   event count. Fails when an entry without `*` does not exist, when a transcript or database is there and cannot
   be read the way the extractor reads it, or when one was skipped because it is not a file inside its home (the
   file is named). Absent without `homes`. The checks above and "models priced" keep reading the device's own home only.
-* **price table** — loads, model count, and which source won (`models.json` or OpenCode 2's catalogue)
+* **price table** — loads, model count, and which source won (`models.json` or OpenCode 2's catalogue). An OpenCode 2
+  catalogue that is there but unusable (no valid `updatedAt`, no priced model) is named, and `models.json` is used
 * **reasoning tokens billed** — 1M reasoning tokens cost the full output rate (the permanent guard against the
   reasoning-exclusion regression)
 * **scenarios resolve** — every configured counterfactual target has a rate card

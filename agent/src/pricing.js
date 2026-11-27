@@ -85,8 +85,11 @@ export async function loadPricing({ modelsJsonPath, catalogDbPath, overridesPath
     tableError = err;
   }
 
+  // Only a usable catalogue competes on freshness (review finding R1): an
+  // unusable one is reported in meta.catalogIgnored and models.json stays.
   const catalog = catalogDbPath ? readCatalog(expandHome(catalogDbPath)) : null;
-  if (catalog && (source === null || catalog.updatedAt > updatedAt)) {
+  const catalogIgnored = catalog?.ignored ?? null;
+  if (catalog?.table && (source === null || catalog.updatedAt > updatedAt)) {
     ({ table, updatedAt, path } = catalog);
     source = "catalog";
     tableError = null;
@@ -100,18 +103,25 @@ export async function loadPricing({ modelsJsonPath, catalogDbPath, overridesPath
     // overrides are optional
   }
 
-  return new Pricing(table, overrides, { modelsPath: path, source, updatedAt, tableError });
+  return new Pricing(table, overrides, { modelsPath: path, source, updatedAt, tableError, catalogIgnored });
 }
 
 /**
- * OpenCode 2's catalogue from its database, converted to models.json's shape,
- * or null whenever it is absent: no file, not a database, no `kv` table (every
- * 1.x database), no catalogue row, or a value that does not parse. The table
- * is looked up before it is queried, so the common 1.x case is a plain answer
- * rather than a caught error.
+ * OpenCode 2's catalogue from its database, converted to models.json's shape.
+ *
+ * - null when it is ABSENT: no file, no `kv` table (every 1.x database), no
+ *   catalogue row. The table is looked up before it is queried, so the common
+ *   1.x case is a plain answer rather than a caught error.
+ * - { ignored: reason } when it is there but UNUSABLE (review finding R1): not
+ *   a database, a value or body that does not parse, no positive `updatedAt`
+ *   of its own (the row's time_updated says when the row was written, not how
+ *   fresh the prices are), or no model with a usable cost. Such a catalogue
+ *   must not displace a working models.json.
+ * - { table, updatedAt, path } otherwise.
  */
 function readCatalog(dbPath) {
   if (!existsSync(dbPath)) return null;
+  const ignored = (why) => ({ ignored: `${dbPath}: ${why}` });
   let db;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
@@ -119,20 +129,36 @@ function readCatalog(dbPath) {
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv'")
       .get();
     if (!hasKv) return null;
-    const row = db.prepare("SELECT value, time_updated FROM kv WHERE key = ?").get(CATALOG_KEY);
-    if (!row || typeof row.value !== "string") return null;
+    const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(CATALOG_KEY);
+    if (!row) return null;
+    if (typeof row.value !== "string") return ignored("the catalogue value is not text");
     const value = JSON.parse(row.value);
-    const body = typeof value?.body === "string" ? JSON.parse(value.body) : value?.body;
-    if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-    const updatedAt = Number.isFinite(value.updatedAt) ? value.updatedAt : Number(row.time_updated) || 0;
-    return { table: fromCatalog(body), updatedAt, path: `${dbPath}#kv:${CATALOG_KEY}` };
-  } catch {
-    return null;
+    if (!Number.isFinite(value?.updatedAt) || value.updatedAt <= 0) {
+      return ignored("the catalogue has no valid updatedAt");
+    }
+    const body = typeof value.body === "string" ? JSON.parse(value.body) : value.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) return ignored("the catalogue body is not a table");
+    const table = fromCatalog(body);
+    if (countPriced(table) === 0) return ignored("the catalogue has no priced model");
+    return { table, updatedAt: value.updatedAt, path: `${dbPath}#kv:${CATALOG_KEY}` };
+  } catch (err) {
+    return ignored(`cannot read the catalogue: ${err.message}`);
   } finally {
     try {
       db?.close();
     } catch {}
   }
+}
+
+function countPriced(table) {
+  let n = 0;
+  for (const provider of Object.values(table)) {
+    const models = provider && typeof provider === "object" ? provider.models : null;
+    if (models && typeof models === "object") {
+      for (const entry of Object.values(models)) if (entry && typeof entry === "object" && entry.cost) n++;
+    }
+  }
+  return n;
 }
 
 // Converts every entry's cost in place: `body` was parsed for this call alone.
